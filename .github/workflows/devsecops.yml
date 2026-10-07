@@ -114,3 +114,16 @@ jobs:
           image-ref: 'juice-shop:ci'
           severity: 'CRITICAL,HIGH'
           exit-code: '1'
+  # ------- Scan IaC : Terraform -------
+  scan_iac:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkov IaC scan
+        uses: bridgecrewio/checkov-action@master
+        with:
+          directory: .
+          framework: terraform
+          soft_fail: true
