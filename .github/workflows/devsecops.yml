@@ -116,7 +116,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: trivy-docker-report
-          path: trivy-docker-report.json
+          path: 'trivy-docker-report.json'
 
       - name: Trivy Docker image security gate
         uses: aquasecurity/trivy-action@master
@@ -184,6 +184,7 @@ jobs:
               echo "Juice Shop is ready"
               exit 0
             fi
+
             echo "Waiting for Juice Shop..."
             sleep 5
           done
@@ -224,12 +225,17 @@ jobs:
         run: |
           docker stop juice-shop || true
           docker rm juice-shop || true
-  # ------- Notifications Discord -------
+
+
+  # ============================================================
+  #              DISCORD SECURITY NOTIFICATION
+  # ============================================================
   notify:
-    name: Discord Notification
+    name: Discord Security Notification
     runs-on: ubuntu-latest
 
     needs:
+      - build
       - sast
       - secrets_scan
       - scan_dependencies
@@ -240,47 +246,216 @@ jobs:
 
     steps:
 
+      # -------- DETECT FAILED CONTROLS --------
+      - name: Detect pipeline status
+        id: status
+        shell: bash
+        run: |
+          FAILED_CONTROLS=""
+
+          if [ "${{ needs.build.result }}" = "failure" ]; then
+            FAILED_CONTROLS="${FAILED_CONTROLS}• 🏗️ Build — Backend Build\n"
+          fi
+
+          if [ "${{ needs.sast.result }}" = "failure" ]; then
+            FAILED_CONTROLS="${FAILED_CONTROLS}• 🧠 SAST — Semgrep\n"
+          fi
+
+          if [ "${{ needs.secrets_scan.result }}" = "failure" ]; then
+            FAILED_CONTROLS="${FAILED_CONTROLS}• 🔑 Secret Scanning — Gitleaks\n"
+          fi
+
+          if [ "${{ needs.scan_dependencies.result }}" = "failure" ]; then
+            FAILED_CONTROLS="${FAILED_CONTROLS}• 📦 SCA — Trivy FS\n"
+          fi
+
+          if [ "${{ needs.docker_scan.result }}" = "failure" ]; then
+            FAILED_CONTROLS="${FAILED_CONTROLS}• 🐳 Container Scanning — Trivy\n"
+          fi
+
+          if [ "${{ needs.dast.result }}" = "failure" ]; then
+            FAILED_CONTROLS="${FAILED_CONTROLS}• 🌐 DAST — OWASP ZAP\n"
+          fi
+
+          {
+            echo "failed_controls<<EOF"
+            printf "%b" "$FAILED_CONTROLS"
+            echo
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
       # -------- FAILED --------
       - name: Notify Discord on failure
-        if: contains(needs.*.result, 'failure')
+        if: |
+          contains(needs.*.result, 'failure')
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
+          MESSAGE=$(cat <<EOF
+          🛡️ **DEVSECOPS SECURITY ALERT**
+
+          ━━━━━━━━━━━━━━━━━━━━
+
+          🔴 **PIPELINE BLOCKED**
+
+          A security gate has detected an issue that requires attention.
+
+          📦 **Repository**
+          \`${{ github.repository }}\`
+
+          🌿 **Branch**
+          \`${{ github.ref_name }}\`
+
+          👤 **Triggered by**
+          \`${{ github.actor }}\`
+
+          🔖 **Commit**
+          \`${{ github.sha }}\`
+
+          ━━━━━━━━━━━━━━━━━━━━
+
+          ⚠️ **Failed Security Controls**
+
+          ${{ steps.status.outputs.failed_controls }}
+
+          ━━━━━━━━━━━━━━━━━━━━
+
+          🔧 **Action required**
+
+          Review the failed security control(s) and remediate the detected issue before the pipeline can be validated.
+
+          🔗 **View Pipeline Run**
+          ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+          ━━━━━━━━━━━━━━━━━━━━
+          🛡️ DevSecOps • Automated Security Validation
+          EOF
+          )
+
+          PAYLOAD=$(jq -n --arg content "$MESSAGE" '{content: $content}')
+
           curl -fsS \
             -H "Content-Type: application/json" \
-            -d "{\"content\":\"🚨 **DevSecOps Pipeline FAILED**\n\n📦 Repository: \`${{ github.repository }}\`\n🌿 Branch: \`${{ github.ref_name }}\`\n👤 Author: \`${{ github.actor }}\`\n🔴 Commit: \`${{ github.sha }}\`\n\n❌ A security control has failed.\n\n🔗 <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}>\"}" \
+            -d "$PAYLOAD" \
             "$DISCORD_WEBHOOK_URL"
+
 
       # -------- SUCCESS --------
       - name: Notify Discord on success
         if: |
           !contains(needs.*.result, 'failure') &&
-          !contains(needs.*.result, 'cancelled')
+          !contains(needs.*.result, 'cancelled') &&
+          !contains(needs.*.result, 'skipped')
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
+          MESSAGE=$(cat <<EOF
+          🛡️ **DEVSECOPS SECURITY REPORT**
+
+          ━━━━━━━━━━━━━━━━━━━━
+
+          🟢 **PIPELINE VALIDATED**
+
+          All blocking security controls have passed successfully.
+
+          📦 **Repository**
+          \`${{ github.repository }}\`
+
+          🌿 **Branch**
+          \`${{ github.ref_name }}\`
+
+          👤 **Triggered by**
+          \`${{ github.actor }}\`
+
+          🔖 **Commit**
+          \`${{ github.sha }}\`
+
+          ━━━━━━━━━━━━━━━━━━━━
+
+          ✅ **Security Validation**
+
+          • 🧠 SAST — Semgrep
+          • 🔑 Secret Scanning — Gitleaks
+          • 📦 SCA — Trivy FS
+          • 🐳 Container Scanning — Trivy
+          • 🌐 DAST — OWASP ZAP
+
+          📋 SBOM — Syft generated
+          🏗️ IaC — Checkov audited
+
+          ━━━━━━━━━━━━━━━━━━━━
+
+          🔗 **View Pipeline Run**
+          ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+          ━━━━━━━━━━━━━━━━━━━━
+          🛡️ DevSecOps • Automated Security Validation
+          EOF
+          )
+
+          PAYLOAD=$(jq -n --arg content "$MESSAGE" '{content: $content}')
+
           curl -fsS \
             -H "Content-Type: application/json" \
-            -d "{\"content\":\"✅ **DevSecOps Pipeline PASSED**\n\n📦 Repository: \`${{ github.repository }}\`\n🌿 Branch: \`${{ github.ref_name }}\`\n👤 Author: \`${{ github.actor }}\`\n\n🛡️ All blocking security controls passed.\n\n🔗 <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}>\"}" \
+            -d "$PAYLOAD" \
             "$DISCORD_WEBHOOK_URL"
+
 
       # -------- CANCELLED --------
       - name: Notify Discord on cancelled
-        if: contains(needs.*.result, 'cancelled')
+        if: |
+          contains(needs.*.result, 'cancelled')
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
+          MESSAGE=$(cat <<EOF
+          ⚠️ **DEVSECOPS PIPELINE CANCELLED**
+
+          ━━━━━━━━━━━━━━━━━━━━
+
+          🟡 **SECURITY VALIDATION INTERRUPTED**
+
+          The workflow was cancelled before all security controls completed.
+
+          📦 **Repository**
+          \`${{ github.repository }}\`
+
+          🌿 **Branch**
+          \`${{ github.ref_name }}\`
+
+          👤 **Triggered by**
+          \`${{ github.actor }}\`
+
+          🔖 **Commit**
+          \`${{ github.sha }}\`
+
+          ━━━━━━━━━━━━━━━━━━━━
+
+          🔗 **View Pipeline Run**
+          ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+          ━━━━━━━━━━━━━━━━━━━━
+          🛡️ DevSecOps • Automated Security Validation
+          EOF
+          )
+
+          PAYLOAD=$(jq -n --arg content "$MESSAGE" '{content: $content}')
+
           curl -fsS \
             -H "Content-Type: application/json" \
-            -d "{\"content\":\"⚠️ **DevSecOps Pipeline CANCELLED**\n\n📦 Repository: \`${{ github.repository }}\`\n🌿 Branch: \`${{ github.ref_name }}\`\n👤 Author: \`${{ github.actor }}\`\n\n🔗 <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}>\"}" \
+            -d "$PAYLOAD" \
             "$DISCORD_WEBHOOK_URL"
 
-  # ------- Résumé final du pipeline -------
+
+  # ============================================================
+  #                    SECURITY CONTROL ROOM
+  # ============================================================
   summary:
-    name: DevSecOps Summary
+    name: 🛡️ Security Control Room
     runs-on: ubuntu-latest
 
     needs:
+      - build
       - sast
       - secrets_scan
       - scan_dependencies
@@ -292,82 +467,196 @@ jobs:
     if: always()
 
     steps:
-      - name: Generate pipeline summary
+
+      - name: Generate Security Control Room
+        shell: bash
         run: |
-          echo "# 🛡️ DevSecOps Pipeline Summary" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
 
-          echo "**Repository :** ${{ github.repository }}" >> $GITHUB_STEP_SUMMARY
-          echo "**Branch :** ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
-          echo "**Commit :** \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "**Author :** ${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "# 🛡️ DEVSECOPS SECURITY CONTROL ROOM" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
 
-          echo "## 📊 Security Controls" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "> **Continuous Security Validation Dashboard**" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
 
-          echo "| # | Contrôle | Outil | Statut |" >> $GITHUB_STEP_SUMMARY
-          echo "|---|---|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "## 📦 Application Context" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "| Property | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Repository | \`${{ github.repository }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Branch | \`${{ github.ref_name }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Commit | \`${{ github.sha }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Triggered by | \`${{ github.actor }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "## 🔍 Security Pipeline" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          echo '```text' >> "$GITHUB_STEP_SUMMARY"
+          echo " SOURCE CODE" >> "$GITHUB_STEP_SUMMARY"
+          echo "      │" >> "$GITHUB_STEP_SUMMARY"
+          echo "      ▼" >> "$GITHUB_STEP_SUMMARY"
+          echo " ┌───────────────┐" >> "$GITHUB_STEP_SUMMARY"
+          echo " │ 🧠 SAST       │  Semgrep" >> "$GITHUB_STEP_SUMMARY"
+          echo " └───────┬───────┘" >> "$GITHUB_STEP_SUMMARY"
+          echo "         │" >> "$GITHUB_STEP_SUMMARY"
+          echo "         ▼" >> "$GITHUB_STEP_SUMMARY"
+          echo " ┌───────────────┐" >> "$GITHUB_STEP_SUMMARY"
+          echo " │ 🔑 SECRETS    │  Gitleaks" >> "$GITHUB_STEP_SUMMARY"
+          echo " └───────┬───────┘" >> "$GITHUB_STEP_SUMMARY"
+          echo "         │" >> "$GITHUB_STEP_SUMMARY"
+          echo "         ▼" >> "$GITHUB_STEP_SUMMARY"
+          echo " ┌───────────────┐" >> "$GITHUB_STEP_SUMMARY"
+          echo " │ 📦 SCA        │  Trivy FS" >> "$GITHUB_STEP_SUMMARY"
+          echo " └───────┬───────┘" >> "$GITHUB_STEP_SUMMARY"
+          echo "         │" >> "$GITHUB_STEP_SUMMARY"
+          echo "         ▼" >> "$GITHUB_STEP_SUMMARY"
+          echo " ┌───────────────┐" >> "$GITHUB_STEP_SUMMARY"
+          echo " │ 🐳 CONTAINER  │  Trivy" >> "$GITHUB_STEP_SUMMARY"
+          echo " └───────┬───────┘" >> "$GITHUB_STEP_SUMMARY"
+          echo "         │" >> "$GITHUB_STEP_SUMMARY"
+          echo "         ▼" >> "$GITHUB_STEP_SUMMARY"
+          echo " ┌───────────────┐" >> "$GITHUB_STEP_SUMMARY"
+          echo " │ 🏗️  IaC       │  Checkov" >> "$GITHUB_STEP_SUMMARY"
+          echo " └───────┬───────┘" >> "$GITHUB_STEP_SUMMARY"
+          echo "         │" >> "$GITHUB_STEP_SUMMARY"
+          echo "         ▼" >> "$GITHUB_STEP_SUMMARY"
+          echo " ┌───────────────┐" >> "$GITHUB_STEP_SUMMARY"
+          echo " │ 📋 SBOM       │  Syft" >> "$GITHUB_STEP_SUMMARY"
+          echo " └───────┬───────┘" >> "$GITHUB_STEP_SUMMARY"
+          echo "         │" >> "$GITHUB_STEP_SUMMARY"
+          echo "         ▼" >> "$GITHUB_STEP_SUMMARY"
+          echo " ┌───────────────┐" >> "$GITHUB_STEP_SUMMARY"
+          echo " │ 🌐 DAST       │  OWASP ZAP" >> "$GITHUB_STEP_SUMMARY"
+          echo " └───────────────┘" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "## 🚦 Security Control Status" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "| Security Layer | Tool | Type | Status |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|---|---|" >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "${{ needs.build.result }}" = "success" ]; then
+            echo "| 🏗️ Build | Node.js | Blocking | 🟢 PASSED |" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "| 🏗️ Build | Node.js | Blocking | 🔴 ${{ needs.build.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          fi
 
           if [ "${{ needs.sast.result }}" = "success" ]; then
-            echo "| 1 | SAST | Semgrep | ✅ success |" >> $GITHUB_STEP_SUMMARY
+            echo "| 🧠 SAST | Semgrep | Blocking | 🟢 PASSED |" >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "| 1 | SAST | Semgrep | ❌ ${{ needs.sast.result }} |" >> $GITHUB_STEP_SUMMARY
+            echo "| 🧠 SAST | Semgrep | Blocking | 🔴 ${{ needs.sast.result }} |" >> "$GITHUB_STEP_SUMMARY"
           fi
 
           if [ "${{ needs.secrets_scan.result }}" = "success" ]; then
-            echo "| 2 | Secret Scanning | Gitleaks | ✅ success |" >> $GITHUB_STEP_SUMMARY
+            echo "| 🔑 Secrets | Gitleaks | Blocking | 🟢 PASSED |" >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "| 2 | Secret Scanning | Gitleaks | ❌ ${{ needs.secrets_scan.result }} |" >> $GITHUB_STEP_SUMMARY
+            echo "| 🔑 Secrets | Gitleaks | Blocking | 🔴 ${{ needs.secrets_scan.result }} |" >> "$GITHUB_STEP_SUMMARY"
           fi
 
           if [ "${{ needs.scan_dependencies.result }}" = "success" ]; then
-            echo "| 3 | SCA | Trivy FS | ✅ success |" >> $GITHUB_STEP_SUMMARY
+            echo "| 📦 SCA | Trivy FS | Blocking | 🟢 PASSED |" >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "| 3 | SCA | Trivy FS | ❌ ${{ needs.scan_dependencies.result }} |" >> $GITHUB_STEP_SUMMARY
+            echo "| 📦 SCA | Trivy FS | Blocking | 🔴 ${{ needs.scan_dependencies.result }} |" >> "$GITHUB_STEP_SUMMARY"
           fi
 
           if [ "${{ needs.docker_scan.result }}" = "success" ]; then
-            echo "| 4 | Container Scanning | Trivy | ✅ success |" >> $GITHUB_STEP_SUMMARY
+            echo "| 🐳 Container | Trivy | Blocking | 🟢 PASSED |" >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "| 4 | Container Scanning | Trivy | ❌ ${{ needs.docker_scan.result }} |" >> $GITHUB_STEP_SUMMARY
+            echo "| 🐳 Container | Trivy | Blocking | 🔴 ${{ needs.docker_scan.result }} |" >> "$GITHUB_STEP_SUMMARY"
           fi
 
           if [ "${{ needs.scan_iac.result }}" = "success" ]; then
-            echo "| 5 | IaC Scanning | Checkov | ✅ success |" >> $GITHUB_STEP_SUMMARY
+            echo "| 🏗️ IaC | Checkov | Audit | 🟡 REVIEWED |" >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "| 5 | IaC Scanning | Checkov | ❌ ${{ needs.scan_iac.result }} |" >> $GITHUB_STEP_SUMMARY
+            echo "| 🏗️ IaC | Checkov | Audit | 🔴 ${{ needs.scan_iac.result }} |" >> "$GITHUB_STEP_SUMMARY"
           fi
 
           if [ "${{ needs.generate_sbom.result }}" = "success" ]; then
-            echo "| 6 | SBOM | Syft | ✅ success |" >> $GITHUB_STEP_SUMMARY
+            echo "| 📋 SBOM | Syft | Inventory | 🟢 GENERATED |" >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "| 6 | SBOM | Syft | ❌ ${{ needs.generate_sbom.result }} |" >> $GITHUB_STEP_SUMMARY
+            echo "| 📋 SBOM | Syft | Inventory | 🔴 ${{ needs.generate_sbom.result }} |" >> "$GITHUB_STEP_SUMMARY"
           fi
 
           if [ "${{ needs.dast.result }}" = "success" ]; then
-            echo "| 7 | DAST | OWASP ZAP | ✅ success |" >> $GITHUB_STEP_SUMMARY
+            echo "| 🌐 DAST | OWASP ZAP | Blocking | 🟢 PASSED |" >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "| 7 | DAST | OWASP ZAP | ❌ ${{ needs.dast.result }} |" >> $GITHUB_STEP_SUMMARY
+            echo "| 🌐 DAST | OWASP ZAP | Blocking | 🔴 ${{ needs.dast.result }} |" >> "$GITHUB_STEP_SUMMARY"
           fi
 
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "---" >> $GITHUB_STEP_SUMMARY
+          echo "" >> "$GITHUB_STEP_SUMMARY"
 
-          if [ "${{ needs.sast.result }}" != "success" ] || \
-             [ "${{ needs.secrets_scan.result }}" != "success" ] || \
-             [ "${{ needs.scan_dependencies.result }}" != "success" ] || \
-             [ "${{ needs.docker_scan.result }}" != "success" ] || \
-             [ "${{ needs.dast.result }}" != "success" ]; then
+          echo "## 🚦 Security Gates" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
 
-            echo "## 🚨 Statut global : PIPELINE BLOQUÉ" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "Au moins un Security Gate bloquant a échoué." >> $GITHUB_STEP_SUMMARY
+          echo "| Gate | Result |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "${{ needs.sast.result }}" = "success" ]; then
+            echo "| 🧠 SAST | 🟢 OPEN |" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "| 🧠 SAST | 🔴 BLOCKED |" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          if [ "${{ needs.secrets_scan.result }}" = "success" ]; then
+            echo "| 🔑 Secrets | 🟢 OPEN |" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "| 🔑 Secrets | 🔴 BLOCKED |" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          if [ "${{ needs.scan_dependencies.result }}" = "success" ]; then
+            echo "| 📦 SCA | 🟢 OPEN |" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "| 📦 SCA | 🔴 BLOCKED |" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          if [ "${{ needs.docker_scan.result }}" = "success" ]; then
+            echo "| 🐳 Container | 🟢 OPEN |" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "| 🐳 Container | 🔴 BLOCKED |" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          if [ "${{ needs.dast.result }}" = "success" ]; then
+            echo "| 🌐 DAST | 🟢 OPEN |" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "| 🌐 DAST | 🔴 BLOCKED |" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "${{ needs.build.result }}" = "success" ] && \
+             [ "${{ needs.sast.result }}" = "success" ] && \
+             [ "${{ needs.secrets_scan.result }}" = "success" ] && \
+             [ "${{ needs.scan_dependencies.result }}" = "success" ] && \
+             [ "${{ needs.docker_scan.result }}" = "success" ] && \
+             [ "${{ needs.dast.result }}" = "success" ]; then
+
+            echo "## 🟢 FINAL DECISION" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "### 🛡️ PIPELINE VALIDATED" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "All blocking security gates have passed successfully." >> "$GITHUB_STEP_SUMMARY"
 
           else
 
-            echo "## ✅ Statut global : PIPELINE VALIDÉ" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "Tous les contrôles de sécurité bloquants sont validés." >> $GITHUB_STEP_SUMMARY
+            echo "## 🔴 FINAL DECISION" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "### 🚨 PIPELINE BLOCKED" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "At least one blocking security gate requires attention before validation." >> "$GITHUB_STEP_SUMMARY"
 
           fi
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "---" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "📎 **Security reports and SBOM are available in the workflow artifacts.**" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "📢 **Discord notification:** enabled" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "🛡️ *DevSecOps • Automated Security Validation*" >> "$GITHUB_STEP_SUMMARY"
