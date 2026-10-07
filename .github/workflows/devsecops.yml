@@ -186,13 +186,14 @@ jobs:
       - name: Prepare workspace permissions
         run: chmod -R a+rw "$GITHUB_WORKSPACE"
 
-      - name: OWASP ZAP Baseline Scan
-        uses: zaproxy/action-baseline@v0.12.0
+       - name: OWASP ZAP Baseline Scan
+         uses: zaproxy/action-baseline@v0.12.0
         with:
           target: 'http://127.0.0.1:3000'
           cmd_options: '-a'
           fail_action: false
           allow_issue_writing: false
+          artifact_name: zap-baseline-report
 
       - name: Upload ZAP report
         uses: actions/upload-artifact@v4
