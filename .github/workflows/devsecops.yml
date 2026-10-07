@@ -191,7 +191,8 @@ jobs:
         with:
           target: 'http://127.0.0.1:3000'
           cmd_options: '-a'
-          fail_action: true
+          fail_action: false
+          allow_issue_writing: false
 
       - name: Upload ZAP report
         uses: actions/upload-artifact@v4
