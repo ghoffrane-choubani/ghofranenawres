@@ -57,3 +57,30 @@ jobs:
 
       - name: Gitleaks scan (filesystem complet)
         run: ./gitleaks detect --no-git --source . --exit-code 1
+  # ------- SCA : dependances vulnerables -------
+  scan_dependencies:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Trivy filesystem scan - report
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          severity: 'CRITICAL,HIGH'
+          format: 'json'
+          output: 'trivy-fs-report.json'
+
+      - name: Upload Trivy fs report
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-fs-report
+          path: trivy-fs-report.json
+
+      - name: Trivy filesystem security gate
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '1'
