@@ -102,7 +102,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Build Docker image
-        run: docker build -f .github/Dockerfile.devsecops -t juice-shop:ci.
+        run: docker build -f .github/Dockerfile.devsecops -t juice-shop:ci .
 
       - name: Trivy Docker image scan - report
         uses: aquasecurity/trivy-action@master
@@ -173,6 +173,7 @@ jobs:
 
       - name: Build Docker image
         run: docker build -f .github/Dockerfile.devsecops -t juice-shop:dast .
+
       - name: Start Juice Shop
         run: docker run -d --name juice-shop -p 3000:3000 juice-shop:dast
 
@@ -195,6 +196,7 @@ jobs:
       - name: OWASP ZAP Baseline Scan
         run: |
           docker run --rm \
+            --user 0 \
             --network host \
             -v "${GITHUB_WORKSPACE}:/zap/wrk/:rw" \
             ghcr.io/zaproxy/zaproxy:stable \
