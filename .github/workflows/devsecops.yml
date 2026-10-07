@@ -147,3 +147,45 @@ jobs:
         with:
           name: sbom
           path: sbom.json
+  # ------- DAST : analyse dynamique de l'application -------
+  dast:
+    runs-on: ubuntu-latest
+    needs: [build]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build -f .github/Dockerfile.devsecops -t juice-shop:dast .
+
+      - name: Start Juice Shop
+        run: docker run -d --name juice-shop -p 3000:3000 juice-shop:dast
+
+      - name: Wait for application
+        run: |
+          for i in {1..30}; do
+            if curl -s http://localhost:3000 > /dev/null; then
+              echo "Juice Shop is ready"
+              break
+            fi
+            echo "Waiting for Juice Shop..."
+            sleep 5
+          done
+
+      - name: OWASP ZAP Baseline Scan
+        uses: zaproxy/action-baseline@v0.12.0
+        with:
+          target: 'http://localhost:3000'
+          cmd_options: '-a'
+          fail_action: true
+
+      - name: Upload ZAP report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: zap-report
+          path: report_html.html
+
+      - name: Stop container
+        if: always()
+        run: docker stop juice-shop
