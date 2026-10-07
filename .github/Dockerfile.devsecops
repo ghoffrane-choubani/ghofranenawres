@@ -9,6 +9,8 @@ RUN npm install --ignore-scripts
 
 RUN cd frontend && npm install --ignore-scripts --legacy-peer-deps
 
+RUN npm rebuild sqlite3
+
 RUN cd frontend && npx ng build --configuration production
 
 RUN npm run build:server
