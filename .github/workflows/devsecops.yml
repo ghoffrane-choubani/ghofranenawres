@@ -23,3 +23,24 @@ jobs:
 
       - name: Build backend
         run: npm run build:server
+  # ------- SAST : analyse du code source -------
+  sast:
+    runs-on: ubuntu-latest
+    container:
+      image: semgrep/semgrep
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Semgrep report
+        run: semgrep scan --config=p/owasp-top-ten --json --output=semgrep-report.json
+        continue-on-error: true
+
+      - name: Upload Semgrep report
+        uses: actions/upload-artifact@v4
+        with:
+          name: semgrep-report
+          path: semgrep-report.json
+
+      - name: Semgrep security gate
+        run: semgrep scan --config=p/owasp-top-ten --error
