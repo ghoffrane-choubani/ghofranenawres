@@ -190,3 +190,63 @@ dast:
       - name: Stop container
         if: always()
         run: docker stop juice-shop
+  # ------- DAST : analyse dynamique de l'application -------
+  dast:
+    runs-on: ubuntu-latest
+    needs: [build]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build -t juice-shop:dast .
+
+      - name: Start Juice Shop
+        run: docker run -d --name juice-shop -p 3000:3000 juice-shop:dast
+
+      - name: Wait for app
+        run: |
+          for i in {1..30}; do
+            if curl -fsS http://127.0.0.1:3000 > /dev/null; then
+              echo "Juice Shop is ready"
+              exit 0
+            fi
+            echo "Waiting for Juice Shop..."
+            sleep 5
+          done
+
+          echo "Juice Shop did not become ready"
+          docker ps -a
+          docker logs juice-shop
+          exit 1
+
+      - name: OWASP ZAP Baseline Scan
+        run: |
+          docker run --rm \
+            --network host \
+            -v "${GITHUB_WORKSPACE}:/zap/wrk/:rw" \
+            ghcr.io/zaproxy/zaproxy:stable \
+            zap-baseline.py \
+            -t http://127.0.0.1:3000 \
+            -J report_json.json \
+            -w report_md.md \
+            -r report_html.html \
+            -a \
+            -I
+
+      - name: Upload ZAP report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zap-report
+          path: |
+            report_html.html
+            report_json.json
+            report_md.md
+          if-no-files-found: warn
+
+      - name: Stop container
+        if: always()
+        run: |
+          docker stop juice-shop || true
+          docker rm juice-shop || true
