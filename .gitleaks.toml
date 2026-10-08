@@ -1,7 +1,7 @@
-title = "DevSecOps Demo Gitleaks Rules"
+title = "DevSecOps Demo"
 
 [[rules]]
-id = "demo-api-key"
-description = "Fake API key used for DevSecOps demonstration"
-regex = '''DEMO_SECRET_[A-Za-z0-9_-]+'''
+id = "demo-secret"
+description = "Demo hardcoded secret"
+regex = '''DEMO_SECRET_[A-Za-z0-9]+'''
 keywords = ["DEMO_SECRET_"]

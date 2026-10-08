@@ -4,14 +4,14 @@ echo "======================================"
 echo "     PRE-COMMIT SECURITY CHECK"
 echo "======================================"
 
-gitleaks git --staged --redact
+gitleaks protect --staged --redact
 
 if [ $? -ne 0 ]; then
     echo ""
-    echo "❌ COMMIT BLOCKED"
+    echo "COMMIT BLOCKED"
     echo "Security issue detected."
     exit 1
 fi
 
-echo "✅ Security check passed."
+echo "Security check passed."
 exit 0
