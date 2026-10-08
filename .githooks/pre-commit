@@ -4,7 +4,7 @@ echo "======================================"
 echo "     PRE-COMMIT SECURITY CHECK"
 echo "======================================"
 
-gitleaks protect --staged --redact
+gitleaks git --staged --redact
 
 if [ $? -ne 0 ]; then
     echo ""
