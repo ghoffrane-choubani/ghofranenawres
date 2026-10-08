@@ -248,3 +248,5 @@ OWASP Juice Shop and any contributions are Copyright © by Bjoern Kimminich & th
 Pre-commit security test.
 
 Pre-commit demo test.
+
+Pre-commit demo test.
