@@ -1,7 +1,7 @@
-title = "DevSecOps Demo"
+title = "DevSecOps Demo Rules"
 
 [[rules]]
-id = "demo-secret"
-description = "Demo hardcoded secret"
-regex = '''DEMO_SECRET_[A-Za-z0-9]+'''
-keywords = ["DEMO_SECRET_"]
+id = "github-token-demo"
+description = "Fake GitHub token used for security demonstration"
+regex = '''ghp_[A-Za-z0-9]{20,}'''
+keywords = ["ghp_"]

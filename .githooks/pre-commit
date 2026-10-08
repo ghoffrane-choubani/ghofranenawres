@@ -4,14 +4,16 @@ echo "======================================"
 echo "     PRE-COMMIT SECURITY CHECK"
 echo "======================================"
 
-gitleaks protect --staged --redact
+gitleaks protect --staged --config .gitleaks.toml --redact
+RESULT=$?
 
-if [ $? -ne 0 ]; then
+if [ $RESULT -ne 0 ]; then
     echo ""
     echo "COMMIT BLOCKED"
     echo "Security issue detected."
     exit 1
 fi
 
+echo ""
 echo "Security check passed."
 exit 0
