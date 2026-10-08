@@ -1,0 +1,7 @@
+title = "DevSecOps Demo Gitleaks Rules"
+
+[[rules]]
+id = "demo-api-key"
+description = "Fake API key used for DevSecOps demonstration"
+regex = '''DEMO_SECRET_[A-Za-z0-9_-]+'''
+keywords = ["DEMO_SECRET_"]
