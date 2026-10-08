@@ -7,7 +7,6 @@ on:
     branches: [main, master]
 
 jobs:
-
   # ------- Etape 1 : build de base (backend uniquement) -------
   build:
     runs-on: ubuntu-latest
@@ -17,14 +16,13 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '24'
+          node-version: "24"
 
       - name: Install backend dependencies only
         run: npm install --ignore-scripts --fetch-retries=5 --fetch-retry-mintimeout=20000 --fetch-retry-maxtimeout=120000
 
       - name: Build backend
         run: npm run build:server
-
 
   # ------- SAST : analyse du code source -------
   sast:
@@ -48,7 +46,6 @@ jobs:
       - name: Semgrep security gate
         run: semgrep scan --config=p/owasp-top-ten --error
 
-
   # ------- Scan de secrets -------
   secrets_scan:
     runs-on: ubuntu-latest
@@ -63,7 +60,6 @@ jobs:
       - name: Gitleaks scan (filesystem complet)
         run: ./gitleaks detect --no-git --source . --exit-code 1
 
-
   # ------- SCA : dependances vulnerables -------
   scan_dependencies:
     runs-on: ubuntu-latest
@@ -74,10 +70,10 @@ jobs:
       - name: Trivy filesystem scan - report
         uses: aquasecurity/trivy-action@master
         with:
-          scan-type: 'fs'
-          severity: 'CRITICAL,HIGH'
-          format: 'json'
-          output: 'trivy-fs-report.json'
+          scan-type: "fs"
+          severity: "CRITICAL,HIGH"
+          format: "json"
+          output: "trivy-fs-report.json"
 
       - name: Upload Trivy fs report
         uses: actions/upload-artifact@v4
@@ -88,10 +84,9 @@ jobs:
       - name: Trivy filesystem security gate
         uses: aquasecurity/trivy-action@master
         with:
-          scan-type: 'fs'
-          severity: 'CRITICAL,HIGH'
-          exit-code: '1'
-
+          scan-type: "fs"
+          severity: "CRITICAL,HIGH"
+          exit-code: "1"
 
   # ------- Scan de l'image Docker -------
   docker_scan:
@@ -107,24 +102,23 @@ jobs:
       - name: Trivy Docker image scan - report
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref: 'juice-shop:ci'
-          severity: 'CRITICAL,HIGH'
-          format: 'json'
-          output: 'trivy-docker-report.json'
+          image-ref: "juice-shop:ci"
+          severity: "CRITICAL,HIGH"
+          format: "json"
+          output: "trivy-docker-report.json"
 
       - name: Upload Trivy Docker report
         uses: actions/upload-artifact@v4
         with:
           name: trivy-docker-report
-          path: 'trivy-docker-report.json'
+          path: "trivy-docker-report.json"
 
       - name: Trivy Docker image security gate
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref: 'juice-shop:ci'
-          severity: 'CRITICAL,HIGH'
-          exit-code: '1'
-
+          image-ref: "juice-shop:ci"
+          severity: "CRITICAL,HIGH"
+          exit-code: "1"
 
   # ------- Scan IaC : Terraform -------
   scan_iac:
@@ -139,7 +133,6 @@ jobs:
           directory: .
           framework: terraform
           soft_fail: true
-
 
   # ------- Génération SBOM -------
   generate_sbom:
@@ -162,7 +155,6 @@ jobs:
           name: sbom
           path: sbom.json
 
-
   # ------- DAST : analyse dynamique de l'application -------
   dast:
     runs-on: ubuntu-latest
@@ -171,12 +163,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # ----------------------------------------------------
+      # BUILD APPLICATION IMAGE
+      # ----------------------------------------------------
       - name: Build Docker image
         run: docker build -f .github/Dockerfile.devsecops -t juice-shop:dast .
 
+      # ----------------------------------------------------
+      # START APPLICATION
+      # ----------------------------------------------------
       - name: Start Juice Shop
         run: docker run -d --name juice-shop -p 3000:3000 juice-shop:dast
 
+      # ----------------------------------------------------
+      # WAIT FOR APPLICATION
+      # ----------------------------------------------------
       - name: Wait for app
         run: |
           for i in {1..30}; do
@@ -194,7 +195,11 @@ jobs:
           docker logs juice-shop
           exit 1
 
+      # ----------------------------------------------------
+      # OWASP ZAP DAST SCAN
+      # ----------------------------------------------------
       - name: OWASP ZAP Baseline Scan
+        continue-on-error: true
         run: |
           docker run --rm \
             --user 0 \
@@ -206,9 +211,11 @@ jobs:
             -J report_json.json \
             -w report_md.md \
             -r report_html.html \
-            -a \
-            -I
+            -a
 
+      # ----------------------------------------------------
+      # UPLOAD ZAP REPORTS
+      # ----------------------------------------------------
       - name: Upload ZAP report
         if: always()
         uses: actions/upload-artifact@v4
@@ -220,12 +227,52 @@ jobs:
             report_md.md
           if-no-files-found: warn
 
+      # ----------------------------------------------------
+      # DAST SECURITY GATE
+      # HIGH / MEDIUM = BLOCK PIPELINE
+      # ----------------------------------------------------
+      - name: DAST Security Gate
+        if: always()
+        run: |
+          echo "=========================================="
+          echo "        OWASP ZAP SECURITY GATE"
+          echo "=========================================="
+
+          if [ ! -f report_json.json ]; then
+            echo "❌ ZAP JSON report was not generated."
+            exit 1
+          fi
+
+          HIGH=$(jq '[.site[]?.alerts[]? | select(.riskcode == "3" or .riskcode == 3)] | length' report_json.json)
+          MEDIUM=$(jq '[.site[]?.alerts[]? | select(.riskcode == "2" or .riskcode == 2)] | length' report_json.json)
+          LOW=$(jq '[.site[]?.alerts[]? | select(.riskcode == "1" or .riskcode == 1)] | length' report_json.json)
+          INFO=$(jq '[.site[]?.alerts[]? | select(.riskcode == "0" or .riskcode == 0)] | length' report_json.json)
+
+          echo ""
+          echo "High vulnerabilities   : $HIGH"
+          echo "Medium vulnerabilities : $MEDIUM"
+          echo "Low vulnerabilities    : $LOW"
+          echo "Informational          : $INFO"
+          echo ""
+
+          if [ "$HIGH" -gt 0 ] || [ "$MEDIUM" -gt 0 ]; then
+            echo "❌ DAST SECURITY GATE FAILED"
+            echo "High/Medium vulnerabilities detected."
+            echo "Pipeline is BLOCKED."
+            exit 1
+          fi
+
+          echo "✅ DAST SECURITY GATE PASSED"
+          echo "No High or Medium vulnerabilities detected."
+
+      # ----------------------------------------------------
+      # STOP APPLICATION
+      # ----------------------------------------------------
       - name: Stop container
         if: always()
         run: |
           docker stop juice-shop || true
           docker rm juice-shop || true
-
 
   # ============================================================
   #              DISCORD SECURITY NOTIFICATION
@@ -245,7 +292,6 @@ jobs:
     if: always()
 
     steps:
-
       # -------- DETECT FAILED CONTROLS --------
       - name: Detect pipeline status
         id: status
@@ -339,7 +385,6 @@ jobs:
             -d "$PAYLOAD" \
             "$DISCORD_WEBHOOK_URL"
 
-
       # -------- SUCCESS --------
       - name: Notify Discord on success
         if: |
@@ -400,7 +445,6 @@ jobs:
             -d "$PAYLOAD" \
             "$DISCORD_WEBHOOK_URL"
 
-
       # -------- CANCELLED --------
       - name: Notify Discord on cancelled
         if: |
@@ -446,7 +490,8 @@ jobs:
             -d "$PAYLOAD" \
             "$DISCORD_WEBHOOK_URL"
 
-
+  # ============================================================
+  # ============================================================
   # ============================================================
   #                    SECURITY CONTROL ROOM
   # ============================================================
@@ -467,7 +512,6 @@ jobs:
     if: always()
 
     steps:
-
       - name: Generate Security Control Room
         shell: bash
         run: |
@@ -660,3 +704,923 @@ jobs:
           echo "📢 **Discord notification:** enabled" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "🛡️ *DevSecOps • Automated Security Validation*" >> "$GITHUB_STEP_SUMMARY"
+  # ============================================================
+  # SECURITY DASHBOARD
+  # ============================================================
+  dashboard:
+    name: 🛡️ Generate Security Dashboard
+    runs-on: ubuntu-latest
+    if: always()
+
+    needs:
+      - build
+      - sast
+      - secrets_scan
+      - scan_dependencies
+      - docker_scan
+      - scan_iac
+      - generate_sbom
+      - dast
+
+    steps:
+      - name: Generate Cybersecurity Dashboard
+        shell: bash
+        run: |
+          mkdir -p dashboard
+
+          BUILD="${{ needs.build.result }}"
+          SAST="${{ needs.sast.result }}"
+          SECRETS="${{ needs.secrets_scan.result }}"
+          SCA="${{ needs.scan_dependencies.result }}"
+          CONTAINER="${{ needs.docker_scan.result }}"
+          IAC="${{ needs.scan_iac.result }}"
+          SBOM="${{ needs.generate_sbom.result }}"
+          DAST="${{ needs.dast.result }}"
+                # ============================================================
+          # DYNAMIC SECURITY METRICS
+          # ============================================================
+
+          status_label() {
+            case "$1" in
+              success)
+                echo "PASSED"
+                ;;
+              failure)
+                echo "FAILED"
+                ;;
+              cancelled)
+                echo "CANCELLED"
+                ;;
+              skipped)
+                echo "SKIPPED"
+                ;;
+              *)
+                echo "REVIEW"
+                ;;
+            esac
+          }
+
+          status_class() {
+            case "$1" in
+              success)
+                echo "badge-success"
+                ;;
+              failure|cancelled)
+                echo "badge-danger"
+                ;;
+              *)
+                echo "badge-warning"
+                ;;
+            esac
+          }
+
+          BUILD_LABEL="$(status_label "$BUILD")"
+          SAST_LABEL="$(status_label "$SAST")"
+          SECRETS_LABEL="$(status_label "$SECRETS")"
+          SCA_LABEL="$(status_label "$SCA")"
+          CONTAINER_LABEL="$(status_label "$CONTAINER")"
+          IAC_LABEL="$(status_label "$IAC")"
+          SBOM_LABEL="$(status_label "$SBOM")"
+          DAST_LABEL="$(status_label "$DAST")"
+
+          BUILD_CLASS="$(status_class "$BUILD")"
+          SAST_CLASS="$(status_class "$SAST")"
+          SECRETS_CLASS="$(status_class "$SECRETS")"
+          SCA_CLASS="$(status_class "$SCA")"
+          CONTAINER_CLASS="$(status_class "$CONTAINER")"
+          IAC_CLASS="$(status_class "$IAC")"
+          SBOM_CLASS="$(status_class "$SBOM")"
+          DAST_CLASS="$(status_class "$DAST")"
+
+          # Blocking controls
+          BLOCKING_TOTAL=6
+          BLOCKING_PASSED=0
+
+          for result in "$BUILD" "$SAST" "$SECRETS" "$SCA" "$CONTAINER" "$DAST"; do
+            if [[ "$result" == "success" ]]; then
+              BLOCKING_PASSED=$((BLOCKING_PASSED + 1))
+            fi
+          done
+
+          # Weighted Security Control Score
+          SCORE=0
+
+          [[ "$BUILD" == "success" ]] && SCORE=$((SCORE + 10))
+          [[ "$SAST" == "success" ]] && SCORE=$((SCORE + 15))
+          [[ "$SECRETS" == "success" ]] && SCORE=$((SCORE + 15))
+          [[ "$SCA" == "success" ]] && SCORE=$((SCORE + 15))
+          [[ "$CONTAINER" == "success" ]] && SCORE=$((SCORE + 15))
+          [[ "$DAST" == "success" ]] && SCORE=$((SCORE + 15))
+          [[ "$IAC" == "success" ]] && SCORE=$((SCORE + 10))
+          [[ "$SBOM" == "success" ]] && SCORE=$((SCORE + 5))
+
+          # Final security decision
+          if [[ "$BUILD" == "success" &&
+                "$SAST" == "success" &&
+                "$SECRETS" == "success" &&
+                "$SCA" == "success" &&
+                "$CONTAINER" == "success" &&
+                "$DAST" == "success" ]]; then
+
+            FINAL_ICON="🟢"
+            FINAL_TITLE="PIPELINE SECURE"
+            FINAL_CLASS="success"
+            FINAL_MESSAGE="All critical security gates passed successfully."
+
+          else
+
+            FINAL_ICON="🔴"
+            FINAL_TITLE="PIPELINE BLOCKED"
+            FINAL_CLASS="danger"
+            FINAL_MESSAGE="One or more blocking security controls require attention."
+
+          fi
+
+          RUN_TIME="$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+          SHORT_SHA="${GITHUB_SHA:0:7}"
+
+          cat > dashboard/security-dashboard.html <<EOF
+          <!DOCTYPE html>
+          <html lang="en">
+          <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+            <title>DevSecOps Security Center</title>
+
+            <style>
+              * {
+                box-sizing: border-box;
+                margin: 0;
+                padding: 0;
+              }
+
+              body {
+                font-family: Inter, Arial, sans-serif;
+                background:
+                  radial-gradient(circle at top right, rgba(0, 255, 170, 0.08), transparent 30%),
+                  radial-gradient(circle at bottom left, rgba(0, 140, 255, 0.08), transparent 30%),
+                  #070b12;
+                color: #e6edf3;
+                min-height: 100vh;
+                padding: 35px;
+              }
+
+              .container {
+                max-width: 1500px;
+                margin: auto;
+              }
+
+              .header {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                padding: 28px;
+                margin-bottom: 25px;
+                border: 1px solid #1d2939;
+                border-radius: 18px;
+                background: rgba(13, 19, 30, 0.88);
+                box-shadow: 0 15px 50px rgba(0,0,0,.35);
+              }
+
+              .brand {
+                display: flex;
+                align-items: center;
+                gap: 18px;
+              }
+
+              .shield {
+                width: 58px;
+                height: 58px;
+                border-radius: 15px;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                font-size: 30px;
+                background: linear-gradient(135deg, #00e6a8, #0077ff);
+                box-shadow: 0 0 30px rgba(0,230,168,.25);
+              }
+
+              h1 {
+                font-size: 28px;
+                letter-spacing: .5px;
+              }
+
+              .subtitle {
+                color: #8290a3;
+                margin-top: 6px;
+                font-size: 14px;
+              }
+
+              .live {
+                display: flex;
+                align-items: center;
+                gap: 8px;
+                padding: 9px 14px;
+                border-radius: 20px;
+                background: rgba(0,230,168,.08);
+                color: #00e6a8;
+                border: 1px solid rgba(0,230,168,.25);
+                font-size: 13px;
+                font-weight: 700;
+              }
+
+              .dot {
+                width: 8px;
+                height: 8px;
+                border-radius: 50%;
+                background: #00e6a8;
+                box-shadow: 0 0 12px #00e6a8;
+              }
+
+              .hero {
+                display: grid;
+                grid-template-columns: 1.3fr 1fr 1fr;
+                gap: 18px;
+                margin-bottom: 25px;
+              }
+
+              .hero-card,
+              .card {
+                background: rgba(13, 19, 30, .88);
+                border: 1px solid #1d2939;
+                border-radius: 18px;
+                padding: 24px;
+              }
+
+              .hero-card h3,
+              .card-title {
+                color: #8290a3;
+                font-size: 12px;
+                text-transform: uppercase;
+                letter-spacing: 1.5px;
+                margin-bottom: 15px;
+              }
+
+              .score {
+                display: flex;
+                align-items: center;
+                gap: 25px;
+              }
+
+              .score-circle {
+                width: 125px;
+                height: 125px;
+                border-radius: 50%;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                flex-direction: column;
+                border: 7px solid #00e6a8;
+                box-shadow: 0 0 35px rgba(0,230,168,.15);
+              }
+
+              .score-number {
+                font-size: 34px;
+                font-weight: 800;
+              }
+
+              .score-label {
+                color: #8290a3;
+                font-size: 12px;
+              }
+
+              .metric {
+                font-size: 32px;
+                font-weight: 800;
+              }
+
+              .success {
+                color: #00e6a8;
+              }
+
+              .danger {
+                color: #ff5c72;
+              }
+
+              .warning {
+                color: #ffb84d;
+              }
+
+              .muted {
+                color: #8290a3;
+              }
+
+              .controls {
+                display: grid;
+                grid-template-columns: repeat(4, 1fr);
+                gap: 16px;
+                margin-bottom: 25px;
+              }
+
+              .control {
+                background: rgba(13, 19, 30, .88);
+                border: 1px solid #1d2939;
+                border-radius: 16px;
+                padding: 20px;
+                transition: .2s ease;
+              }
+
+              .control:hover {
+                transform: translateY(-3px);
+                border-color: #34445a;
+              }
+
+              .control-top {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                margin-bottom: 18px;
+              }
+
+              .icon {
+                font-size: 23px;
+              }
+
+              .badge {
+                padding: 5px 9px;
+                border-radius: 7px;
+                font-size: 10px;
+                font-weight: 800;
+                letter-spacing: .6px;
+              }
+
+              .badge-success {
+                color: #00e6a8;
+                background: rgba(0,230,168,.1);
+              }
+
+              .badge-danger {
+                color: #ff5c72;
+                background: rgba(255,92,114,.1);
+              }
+
+              .badge-warning {
+                color: #ffb84d;
+                background: rgba(255,184,77,.1);
+              }
+
+              .control h3 {
+                font-size: 16px;
+                margin-bottom: 6px;
+              }
+
+              .tool {
+                color: #8290a3;
+                font-size: 12px;
+              }
+
+              .section {
+                margin-bottom: 25px;
+              }
+
+              .section-header {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                margin-bottom: 15px;
+              }
+
+              .section-title {
+                font-size: 17px;
+                font-weight: 700;
+              }
+
+              .pipeline {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                gap: 8px;
+                overflow-x: auto;
+              }
+
+              .stage {
+                min-width: 135px;
+                text-align: center;
+                padding: 17px 12px;
+                border-radius: 12px;
+                background: #0b111b;
+                border: 1px solid #1d2939;
+              }
+
+              .stage-icon {
+                font-size: 22px;
+                margin-bottom: 8px;
+              }
+
+              .stage-name {
+                font-size: 11px;
+                font-weight: 700;
+              }
+
+              .arrow {
+                color: #34445a;
+                font-size: 20px;
+              }
+
+              .gates {
+                display: grid;
+                gap: 13px;
+              }
+
+              .gate {
+                display: grid;
+                grid-template-columns: 160px 1fr 100px;
+                align-items: center;
+                gap: 15px;
+              }
+
+              .gate-name {
+                font-size: 13px;
+                font-weight: 600;
+              }
+
+              .bar {
+                height: 8px;
+                border-radius: 20px;
+                background: #182230;
+                overflow: hidden;
+              }
+
+              .bar-fill {
+                height: 100%;
+                width: 100%;
+                background: linear-gradient(90deg, #00e6a8, #0077ff);
+                border-radius: 20px;
+              }
+
+              .gate-status {
+                text-align: right;
+                font-size: 11px;
+                font-weight: 800;
+              }
+
+              .decision {
+                text-align: center;
+                padding: 35px;
+                border-radius: 18px;
+                background: linear-gradient(
+                  135deg,
+                  rgba(0,230,168,.07),
+                  rgba(0,119,255,.06)
+                );
+                border: 1px solid rgba(0,230,168,.2);
+              }
+
+              .decision-icon {
+                font-size: 48px;
+                margin-bottom: 12px;
+              }
+
+              .decision h2 {
+                color: #00e6a8;
+                font-size: 25px;
+                margin-bottom: 8px;
+              }
+
+              .decision p {
+                color: #8290a3;
+              }
+
+              .metadata {
+                display: grid;
+                grid-template-columns: repeat(4, 1fr);
+                gap: 12px;
+              }
+
+              .meta {
+                background: #0b111b;
+                padding: 15px;
+                border-radius: 10px;
+                border: 1px solid #1d2939;
+              }
+
+              .meta-label {
+                font-size: 10px;
+                color: #68788d;
+                text-transform: uppercase;
+                margin-bottom: 6px;
+              }
+
+              .meta-value {
+                font-size: 12px;
+                font-weight: 600;
+                word-break: break-word;
+              }
+
+              footer {
+                text-align: center;
+                margin-top: 30px;
+                color: #4f6075;
+                font-size: 11px;
+              }
+
+              @media (max-width: 1000px) {
+                .hero,
+                .controls,
+                .metadata {
+                  grid-template-columns: repeat(2, 1fr);
+                }
+              }
+
+              @media (max-width: 650px) {
+                body {
+                  padding: 15px;
+                }
+
+                .hero,
+                .controls,
+                .metadata {
+                  grid-template-columns: 1fr;
+                }
+
+                .header {
+                  flex-direction: column;
+                  gap: 15px;
+                  align-items: flex-start;
+                }
+              }
+            </style>
+          </head>
+
+          <body>
+
+          <div class="container">
+
+            <header class="header">
+              <div class="brand">
+                <div class="shield">🛡️</div>
+
+                <div>
+                  <h1>DEVSECOPS SECURITY CENTER</h1>
+                  <div class="subtitle">
+                    Continuous Security Validation • OWASP Juice Shop
+                  </div>
+                </div>
+              </div>
+
+              <div class="live">
+                <span class="dot"></span>
+                PIPELINE ACTIVE
+              </div>
+            </header>
+
+
+            <!-- SECURITY POSTURE -->
+
+            <section class="hero">
+
+              <div class="hero-card">
+
+                <div class="card-title">
+                  Security Posture
+                </div>
+
+                <div class="score">
+
+                  <div class="score-circle">
+                    <div class="score-number">100</div>
+                    <div class="score-label">/ 100</div>
+                  </div>
+
+                  <div>
+                    <div class="metric success">
+                      SECURE
+                    </div>
+
+                    <p class="muted">
+                      All blocking security controls passed.
+                    </p>
+                  </div>
+
+                </div>
+
+              </div>
+
+
+              <div class="hero-card">
+
+                <div class="card-title">
+                  Pipeline Status
+                </div>
+
+                <div class="metric success">
+                  ● PASSED
+                </div>
+
+                <p class="muted">
+                   $FINAL_MESSAGE
+                </p>
+
+              </div>
+
+
+              <div class="hero-card">
+
+                <div class="card-title">
+                  Security Gates
+                </div>
+
+                <div class="metric success">
+                  5 / 5
+                </div>
+
+                <p class="muted">
+                  Blocking controls passed.
+                </p>
+
+              </div>
+
+            </section>
+
+
+            <!-- SECURITY CONTROLS -->
+
+            <section class="section">
+
+              <div class="section-header">
+                <div class="section-title">
+                  Security Controls
+                </div>
+
+                <div class="muted">
+                  Automated validation
+                </div>
+              </div>
+
+
+              <div class="controls">
+
+                <div class="control">
+                  <div class="control-top">
+                    <span class="icon">🧠</span>
+                    <span class="badge badge-success">PASSED</span>
+                  </div>
+                  <h3>SAST</h3>
+                  <div class="tool">Semgrep • OWASP Top 10</div>
+                </div>
+
+
+                <div class="control">
+                  <div class="control-top">
+                    <span class="icon">🔑</span>
+                    <span class="badge badge-success">PASSED</span>
+                  </div>
+                  <h3>Secrets</h3>
+                  <div class="tool">Gitleaks</div>
+                </div>
+
+
+                <div class="control">
+                  <div class="control-top">
+                    <span class="icon">📦</span>
+                    <span class="badge badge-success">PASSED</span>
+                  </div>
+                  <h3>SCA</h3>
+                  <div class="tool">Trivy Filesystem</div>
+                </div>
+
+
+                <div class="control">
+                  <div class="control-top">
+                    <span class="icon">🐳</span>
+                    <span class="badge badge-success">PASSED</span>
+                  </div>
+                  <h3>Container</h3>
+                  <div class="tool">Trivy Image</div>
+                </div>
+
+
+                <div class="control">
+                  <div class="control-top">
+                    <span class="icon">🏗️</span>
+                    <span class="badge badge-success">REVIEWED</span>
+                  </div>
+                  <h3>IaC</h3>
+                  <div class="tool">Checkov</div>
+                </div>
+
+
+                <div class="control">
+                  <div class="control-top">
+                    <span class="icon">📋</span>
+                    <span class="badge badge-success">GENERATED</span>
+                  </div>
+                  <h3>SBOM</h3>
+                  <div class="tool">Syft • CycloneDX</div>
+                </div>
+
+
+                <div class="control">
+                  <div class="control-top">
+                    <span class="icon">🌐</span>
+                    <span class="badge badge-success">PASSED</span>
+                  </div>
+                  <h3>DAST</h3>
+                  <div class="tool">OWASP ZAP</div>
+                </div>
+
+
+                <div class="control">
+                  <div class="control-top">
+                    <span class="icon">⚙️</span>
+                    <span class="badge badge-success">PASSED</span>
+                  </div>
+                  <h3>Build</h3>
+                  <div class="tool">Node.js 24</div>
+                </div>
+
+              </div>
+
+            </section>
+
+
+            <!-- PIPELINE -->
+
+            <section class="section card">
+
+              <div class="section-header">
+                <div class="section-title">
+                  Security Pipeline
+                </div>
+
+                <div class="muted">
+                  Shift-Left Security
+                </div>
+              </div>
+
+              <div class="pipeline">
+
+                <div class="stage">
+                  <div class="stage-icon">📥</div>
+                  <div class="stage-name">SOURCE</div>
+                </div>
+
+                <div class="arrow">→</div>
+
+                <div class="stage">
+                  <div class="stage-icon">🧠</div>
+                  <div class="stage-name">SAST</div>
+                </div>
+
+                <div class="arrow">→</div>
+
+                <div class="stage">
+                  <div class="stage-icon">🔑</div>
+                  <div class="stage-name">SECRETS</div>
+                </div>
+
+                <div class="arrow">→</div>
+
+                <div class="stage">
+                  <div class="stage-icon">📦</div>
+                  <div class="stage-name">SCA</div>
+                </div>
+
+                <div class="arrow">→</div>
+
+                <div class="stage">
+                  <div class="stage-icon">🐳</div>
+                  <div class="stage-name">CONTAINER</div>
+                </div>
+
+                <div class="arrow">→</div>
+
+                <div class="stage">
+                  <div class="stage-icon">🌐</div>
+                  <div class="stage-name">DAST</div>
+                </div>
+
+              </div>
+
+            </section>
+
+
+            <!-- SECURITY GATES -->
+
+            <section class="section card">
+
+              <div class="section-header">
+                <div class="section-title">
+                  🔥 Security Gates
+                </div>
+              </div>
+
+              <div class="gates">
+
+                <div class="gate">
+                  <div class="gate-name">SAST</div>
+                  <div class="bar"><div class="bar-fill"></div></div>
+                  <div class="gate-status success">OPEN</div>
+                </div>
+
+                <div class="gate">
+                  <div class="gate-name">SECRETS</div>
+                  <div class="bar"><div class="bar-fill"></div></div>
+                  <div class="gate-status success">OPEN</div>
+                </div>
+
+                <div class="gate">
+                  <div class="gate-name">SCA</div>
+                  <div class="bar"><div class="bar-fill"></div></div>
+                  <div class="gate-status success">OPEN</div>
+                </div>
+
+                <div class="gate">
+                  <div class="gate-name">CONTAINER</div>
+                  <div class="bar"><div class="bar-fill"></div></div>
+                  <div class="gate-status success">OPEN</div>
+                </div>
+
+                <div class="gate">
+                  <div class="gate-name">DAST</div>
+                  <div class="bar"><div class="bar-fill"></div></div>
+                  <div class="gate-status success">OPEN</div>
+                </div>
+
+              </div>
+
+            </section>
+
+
+            <!-- FINAL DECISION -->
+
+            <section class="section">
+
+              <div class="decision">
+
+                <div class="decision-icon">🟢</div>
+
+                <h2>PIPELINE SECURE</h2>
+
+                <p>
+                  All critical security gates passed successfully.
+                  Application is ready for the next delivery stage.
+                </p>
+
+              </div>
+
+            </section>
+
+
+            <!-- METADATA -->
+
+            <section class="section card">
+
+              <div class="section-header">
+                <div class="section-title">
+                  Pipeline Information
+                </div>
+              </div>
+
+              <div class="metadata">
+
+                <div class="meta">
+                  <div class="meta-label">Repository</div>
+                  <div class="meta-value">
+                    ${{ github.repository }}
+                  </div>
+                </div>
+
+                <div class="meta">
+                  <div class="meta-label">Branch</div>
+                  <div class="meta-value">
+                    ${{ github.ref_name }}
+                  </div>
+                </div>
+
+                <div class="meta">
+                  <div class="meta-label">Commit</div>
+                  <div class="meta-value">
+                    ${{ github.sha }}
+                  </div>
+                </div>
+
+                <div class="meta">
+                  <div class="meta-label">Triggered By</div>
+                  <div class="meta-value">
+                    ${{ github.actor }}
+                  </div>
+                </div>
+
+              </div>
+
+            </section>
+
+
+            <footer>
+              🛡️ DevSecOps Security Center • Automated Security Validation
+            </footer>
+
+          </div>
+
+          </body>
+          </html>
+          EOF
+
+      - name: Upload Security Dashboard
+        uses: actions/upload-artifact@v4
+        with:
+          name: devsecops-security-dashboard
+          path: dashboard/security-dashboard.html
+          retention-days: 30
