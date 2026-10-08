@@ -1,0 +1,19 @@
+@'
+#!/bin/sh
+
+echo "======================================"
+echo "     PRE-COMMIT SECURITY CHECK"
+echo "======================================"
+
+gitleaks protect --staged --redact
+
+if [ $? -ne 0 ]; then
+    echo ""
+    echo "❌ COMMIT BLOCKED"
+    echo "Security issue detected."
+    exit 1
+fi
+
+echo "✅ Security check passed."
+exit 0
+'@ | Set-Content -Path .githooks\pre-commit -Encoding utf8

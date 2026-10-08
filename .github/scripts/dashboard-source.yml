@@ -1,0 +1,2487 @@
+﻿name: DevSecOps Pipeline
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+
+  # ============================================================
+  # BUILD
+  # ============================================================
+  build:
+    name: ­ƒÅù´©Å Build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Install backend dependencies only
+        run: npm install --ignore-scripts --fetch-retries=5 --fetch-retry-mintimeout=20000 --fetch-retry-maxtimeout=120000
+
+      - name: Build backend
+        run: npm run build:server
+
+
+  # ============================================================
+  # SAST - SEMGREP
+  # ============================================================
+  sast:
+    name: ­ƒºá SAST - Semgrep
+    runs-on: ubuntu-latest
+    container:
+      image: semgrep/semgrep
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Semgrep report
+        run: |
+          semgrep scan \
+            --config=p/owasp-top-ten \
+            --json \
+            --output=semgrep-report.json
+        continue-on-error: true
+
+      - name: Upload Semgrep report
+        uses: actions/upload-artifact@v4
+        with:
+          name: semgrep-report
+          path: semgrep-report.json
+
+      - name: Semgrep security gate
+        run: |
+          semgrep scan \
+            --config=p/owasp-top-ten \
+            --error
+
+
+  # ============================================================
+  # SECRET SCANNING - GITLEAKS
+  # ============================================================
+  secrets_scan:
+    name: ­ƒöæ Secret Scanning - Gitleaks
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Gitleaks
+        run: |
+          curl -sSfL \
+            https://github.com/gitleaks/gitleaks/releases/download/v8.24.3/gitleaks_8.24.3_linux_x64.tar.gz \
+            | tar -xz gitleaks
+
+      - name: Gitleaks scan
+        run: |
+          ./gitleaks detect \
+            --no-git \
+            --source . \
+            --exit-code 1
+
+
+  # ============================================================
+  # SCA - TRIVY FILESYSTEM
+  # ============================================================
+  scan_dependencies:
+    name: ­ƒôª SCA - Trivy FS
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Trivy filesystem scan - report
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: "fs"
+          severity: "CRITICAL,HIGH"
+          format: "json"
+          output: "trivy-fs-report.json"
+
+      - name: Upload Trivy FS report
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-fs-report
+          path: trivy-fs-report.json
+
+      - name: Trivy filesystem security gate
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: "fs"
+          severity: "CRITICAL,HIGH"
+          exit-code: "1"
+
+
+  # ============================================================
+  # CONTAINER SCANNING - TRIVY
+  # ============================================================
+  docker_scan:
+    name: ­ƒÉ│ Container Scan - Trivy
+    runs-on: ubuntu-latest
+    needs: [build]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: |
+          docker build \
+            -f .github/Dockerfile.devsecops \
+            -t juice-shop:ci .
+
+      - name: Trivy Docker image scan - report
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: "juice-shop:ci"
+          severity: "CRITICAL,HIGH"
+          format: "json"
+          output: "trivy-docker-report.json"
+
+      - name: Upload Trivy Docker report
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-docker-report
+          path: trivy-docker-report.json
+
+      - name: Trivy Docker image security gate
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: "juice-shop:ci"
+          severity: "CRITICAL,HIGH"
+          exit-code: "1"
+
+
+  # ============================================================
+  # IAC - CHECKOV
+  # ============================================================
+  scan_iac:
+    name: ­ƒÅù´©Å IaC Scan - Checkov
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkov IaC scan
+        uses: bridgecrewio/checkov-action@master
+        with:
+          directory: .
+          framework: terraform
+          soft_fail: true
+
+
+  # ============================================================
+  # SBOM - SYFT
+  # ============================================================
+  generate_sbom:
+    name: ­ƒôï SBOM - Syft
+    runs-on: ubuntu-latest
+    needs: [build]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Syft
+        run: |
+          curl -sSfL \
+            https://raw.githubusercontent.com/anchore/syft/main/install.sh \
+            | sh -s -- -b /usr/local/bin
+
+      - name: Generate SBOM
+        run: |
+          syft . -o cyclonedx-json=sbom.json
+
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: sbom.json
+
+
+  # ============================================================
+  # DAST - OWASP ZAP
+  # ============================================================
+  dast:
+    name: ­ƒîÉ DAST - OWASP ZAP
+    runs-on: ubuntu-latest
+    needs: [build]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: |
+          docker build \
+            -f .github/Dockerfile.devsecops \
+            -t juice-shop:dast .
+
+      - name: Start Juice Shop
+        run: |
+          docker run -d \
+            --name juice-shop \
+            -p 3000:3000 \
+            juice-shop:dast
+
+      - name: Wait for app
+        run: |
+          for i in {1..30}; do
+            if curl -fsS http://127.0.0.1:3000 > /dev/null; then
+              echo "Juice Shop is ready"
+              exit 0
+            fi
+
+            echo "Waiting for Juice Shop..."
+            sleep 5
+          done
+
+          echo "Juice Shop did not become ready"
+          docker ps -a
+          docker logs juice-shop
+          exit 1
+
+      - name: OWASP ZAP Baseline Scan
+        run: |
+          docker run --rm \
+            --user 0 \
+            --network host \
+            -v "${GITHUB_WORKSPACE}:/zap/wrk/:rw" \
+            ghcr.io/zaproxy/zaproxy:stable \
+            zap-baseline.py \
+            -t http://127.0.0.1:3000 \
+            -J report_json.json \
+            -w report_md.md \
+            -r report_html.html \
+            -a \
+            -I
+
+      - name: Upload ZAP reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zap-report
+          path: |
+            report_html.html
+            report_json.json
+            report_md.md
+          if-no-files-found: warn
+
+      - name: Stop container
+        if: always()
+        run: |
+          docker stop juice-shop || true
+          docker rm juice-shop || true
+
+
+  # ============================================================
+  # DISCORD SECURITY NOTIFICATION
+  # ============================================================
+  notify:
+    name: ­ƒôó Discord Security Notification
+    runs-on: ubuntu-latest
+
+    needs:
+      - build
+      - sast
+      - secrets_scan
+      - scan_dependencies
+      - docker_scan
+      - dast
+
+    if: always()
+
+    steps:
+
+      - name: Detect pipeline status
+        id: status
+        shell: bash
+        run: |
+          FAILED_CONTROLS=""
+
+          if [ "${{ needs.build.result }}" = "failure" ]; then
+            FAILED_CONTROLS="${FAILED_CONTROLS}ÔÇó ­ƒÅù´©Å Build ÔÇö Backend Build\n"
+          fi
+
+          if [ "${{ needs.sast.result }}" = "failure" ]; then
+            FAILED_CONTROLS="${FAILED_CONTROLS}ÔÇó ­ƒºá SAST ÔÇö Semgrep\n"
+          fi
+
+          if [ "${{ needs.secrets_scan.result }}" = "failure" ]; then
+            FAILED_CONTROLS="${FAILED_CONTROLS}ÔÇó ­ƒöæ Secret Scanning ÔÇö Gitleaks\n"
+          fi
+
+          if [ "${{ needs.scan_dependencies.result }}" = "failure" ]; then
+            FAILED_CONTROLS="${FAILED_CONTROLS}ÔÇó ­ƒôª SCA ÔÇö Trivy FS\n"
+          fi
+
+          if [ "${{ needs.docker_scan.result }}" = "failure" ]; then
+            FAILED_CONTROLS="${FAILED_CONTROLS}ÔÇó ­ƒÉ│ Container Scanning ÔÇö Trivy\n"
+          fi
+
+          if [ "${{ needs.dast.result }}" = "failure" ]; then
+            FAILED_CONTROLS="${FAILED_CONTROLS}ÔÇó ­ƒîÉ DAST ÔÇö OWASP ZAP\n"
+          fi
+
+          {
+            echo "failed_controls<<EOF"
+            printf "%b" "$FAILED_CONTROLS"
+            echo
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+
+      - name: Notify Discord on failure
+        if: contains(needs.*.result, 'failure')
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          MESSAGE=$(cat <<EOF
+          ­ƒøí´©Å **DEVSECOPS SECURITY ALERT**
+
+          ÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöü
+
+          ­ƒö┤ **PIPELINE BLOCKED**
+
+          A security gate has detected an issue that requires attention.
+
+          ­ƒôª **Repository**
+          \`${{ github.repository }}\`
+
+          ­ƒî┐ **Branch**
+          \`${{ github.ref_name }}\`
+
+          ­ƒæñ **Triggered by**
+          \`${{ github.actor }}\`
+
+          ­ƒöû **Commit**
+          \`${{ github.sha }}\`
+
+          ÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöü
+
+          ÔÜá´©Å **Failed Security Controls**
+
+          ${{ steps.status.outputs.failed_controls }}
+
+          ÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöü
+
+          ­ƒöº **Action required**
+
+          Review the failed security control(s) and remediate the detected issue before the pipeline can be validated.
+
+          ­ƒöù **View Pipeline Run**
+          ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+          ÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöü
+          ­ƒøí´©Å DevSecOps ÔÇó Automated Security Validation
+          EOF
+          )
+
+          PAYLOAD=$(jq -n --arg content "$MESSAGE" '{content: $content}')
+
+          curl -fsS \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD" \
+            "$DISCORD_WEBHOOK_URL"
+
+
+      - name: Notify Discord on success
+        if: |
+          !contains(needs.*.result, 'failure') &&
+          !contains(needs.*.result, 'cancelled') &&
+          !contains(needs.*.result, 'skipped')
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          MESSAGE=$(cat <<EOF
+          ­ƒøí´©Å **DEVSECOPS SECURITY REPORT**
+
+          ÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöü
+
+          ­ƒƒó **PIPELINE VALIDATED**
+
+          All blocking security controls have passed successfully.
+
+          ­ƒôª **Repository**
+          \`${{ github.repository }}\`
+
+          ­ƒî┐ **Branch**
+          \`${{ github.ref_name }}\`
+
+          ­ƒæñ **Triggered by**
+          \`${{ github.actor }}\`
+
+          ­ƒöû **Commit**
+          \`${{ github.sha }}\`
+
+          ÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöü
+
+          Ô£à **Security Validation**
+
+          ÔÇó ­ƒºá SAST ÔÇö Semgrep
+          ÔÇó ­ƒöæ Secret Scanning ÔÇö Gitleaks
+          ÔÇó ­ƒôª SCA ÔÇö Trivy FS
+          ÔÇó ­ƒÉ│ Container Scanning ÔÇö Trivy
+          ÔÇó ­ƒîÉ DAST ÔÇö OWASP ZAP
+
+          ­ƒôï SBOM ÔÇö Syft generated
+          ­ƒÅù´©Å IaC ÔÇö Checkov audited
+
+          ÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöü
+
+          ­ƒöù **View Pipeline Run**
+          ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+          ÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöü
+          ­ƒøí´©Å DevSecOps ÔÇó Automated Security Validation
+          EOF
+          )
+
+          PAYLOAD=$(jq -n --arg content "$MESSAGE" '{content: $content}')
+
+          curl -fsS \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD" \
+            "$DISCORD_WEBHOOK_URL"
+
+
+      - name: Notify Discord on cancelled
+        if: contains(needs.*.result, 'cancelled')
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          MESSAGE=$(cat <<EOF
+          ÔÜá´©Å **DEVSECOPS PIPELINE CANCELLED**
+
+          ÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöü
+
+          ­ƒƒí **SECURITY VALIDATION INTERRUPTED**
+
+          The workflow was cancelled before all security controls completed.
+
+          ­ƒôª **Repository**
+          \`${{ github.repository }}\`
+
+          ­ƒî┐ **Branch**
+          \`${{ github.ref_name }}\`
+
+          ­ƒæñ **Triggered by**
+          \`${{ github.actor }}\`
+
+          ­ƒöû **Commit**
+          \`${{ github.sha }}\`
+
+          ÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöü
+
+          ­ƒöù **View Pipeline Run**
+          ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+          ÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöü
+          ­ƒøí´©Å DevSecOps ÔÇó Automated Security Validation
+          EOF
+          )
+
+          PAYLOAD=$(jq -n --arg content "$MESSAGE" '{content: $content}')
+
+          curl -fsS \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD" \
+            "$DISCORD_WEBHOOK_URL"
+
+
+  # ============================================================
+  # SECURITY CONTROL ROOM - GITHUB SUMMARY
+  # ============================================================
+  summary:
+    name: ­ƒøí´©Å Security Control Room
+    runs-on: ubuntu-latest
+
+    needs:
+      - build
+      - sast
+      - secrets_scan
+      - scan_dependencies
+      - docker_scan
+      - scan_iac
+      - generate_sbom
+      - dast
+
+    if: always()
+
+    steps:
+      - name: Generate Security Control Room
+        shell: bash
+        run: |
+
+          echo "# ­ƒøí´©Å DEVSECOPS SECURITY CONTROL ROOM" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "> **Continuous Security Validation Dashboard**" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "## ­ƒôª Application Context" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "| Property | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Repository | \`${{ github.repository }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Branch | \`${{ github.ref_name }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Commit | \`${{ github.sha }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Triggered by | \`${{ github.actor }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "## ­ƒöì Security Pipeline" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          echo '```text' >> "$GITHUB_STEP_SUMMARY"
+          echo "SOURCE CODE" >> "$GITHUB_STEP_SUMMARY"
+          echo "     Ôöé" >> "$GITHUB_STEP_SUMMARY"
+          echo "     Ôû╝" >> "$GITHUB_STEP_SUMMARY"
+          echo "­ƒºá SAST - Semgrep" >> "$GITHUB_STEP_SUMMARY"
+          echo "     Ôöé" >> "$GITHUB_STEP_SUMMARY"
+          echo "     Ôû╝" >> "$GITHUB_STEP_SUMMARY"
+          echo "­ƒöæ Secrets - Gitleaks" >> "$GITHUB_STEP_SUMMARY"
+          echo "     Ôöé" >> "$GITHUB_STEP_SUMMARY"
+          echo "     Ôû╝" >> "$GITHUB_STEP_SUMMARY"
+          echo "­ƒôª SCA - Trivy FS" >> "$GITHUB_STEP_SUMMARY"
+          echo "     Ôöé" >> "$GITHUB_STEP_SUMMARY"
+          echo "     Ôû╝" >> "$GITHUB_STEP_SUMMARY"
+          echo "­ƒÉ│ Container - Trivy" >> "$GITHUB_STEP_SUMMARY"
+          echo "     Ôöé" >> "$GITHUB_STEP_SUMMARY"
+          echo "     Ôû╝" >> "$GITHUB_STEP_SUMMARY"
+          echo "­ƒÅù´©Å IaC - Checkov" >> "$GITHUB_STEP_SUMMARY"
+          echo "     Ôöé" >> "$GITHUB_STEP_SUMMARY"
+          echo "     Ôû╝" >> "$GITHUB_STEP_SUMMARY"
+          echo "­ƒôï SBOM - Syft" >> "$GITHUB_STEP_SUMMARY"
+          echo "     Ôöé" >> "$GITHUB_STEP_SUMMARY"
+          echo "     Ôû╝" >> "$GITHUB_STEP_SUMMARY"
+          echo "­ƒîÉ DAST - OWASP ZAP" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "## ­ƒÜª Security Control Status" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "| Security Layer | Tool | Type | Status |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|---|---|" >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "${{ needs.build.result }}" = "success" ]; then
+            echo "| ­ƒÅù´©Å Build | Node.js | Blocking | ­ƒƒó PASSED |" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "| ­ƒÅù´©Å Build | Node.js | Blocking | ­ƒö┤ ${{ needs.build.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          if [ "${{ needs.sast.result }}" = "success" ]; then
+            echo "| ­ƒºá SAST | Semgrep | Blocking | ­ƒƒó PASSED |" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "| ­ƒºá SAST | Semgrep | Blocking | ­ƒö┤ ${{ needs.sast.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          if [ "${{ needs.secrets_scan.result }}" = "success" ]; then
+            echo "| ­ƒöæ Secrets | Gitleaks | Blocking | ­ƒƒó PASSED |" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "| ­ƒöæ Secrets | Gitleaks | Blocking | ­ƒö┤ ${{ needs.secrets_scan.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          if [ "${{ needs.scan_dependencies.result }}" = "success" ]; then
+            echo "| ­ƒôª SCA | Trivy FS | Blocking | ­ƒƒó PASSED |" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "| ­ƒôª SCA | Trivy FS | Blocking | ­ƒö┤ ${{ needs.scan_dependencies.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          if [ "${{ needs.docker_scan.result }}" = "success" ]; then
+            echo "| ­ƒÉ│ Container | Trivy | Blocking | ­ƒƒó PASSED |" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "| ­ƒÉ│ Container | Trivy | Blocking | ­ƒö┤ ${{ needs.docker_scan.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          if [ "${{ needs.scan_iac.result }}" = "success" ]; then
+            echo "| ­ƒÅù´©Å IaC | Checkov | Audit | ­ƒƒí REVIEWED |" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "| ­ƒÅù´©Å IaC | Checkov | Audit | ­ƒö┤ ${{ needs.scan_iac.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          if [ "${{ needs.generate_sbom.result }}" = "success" ]; then
+            echo "| ­ƒôï SBOM | Syft | Inventory | ­ƒƒó GENERATED |" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "| ­ƒôï SBOM | Syft | Inventory | ­ƒö┤ ${{ needs.generate_sbom.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          if [ "${{ needs.dast.result }}" = "success" ]; then
+            echo "| ­ƒîÉ DAST | OWASP ZAP | Blocking | ­ƒƒó PASSED |" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "| ­ƒîÉ DAST | OWASP ZAP | Blocking | ­ƒö┤ ${{ needs.dast.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "## ­ƒÜª Security Gates" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "| Gate | Result |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "${{ needs.sast.result }}" = "success" ]; then
+            echo "| ­ƒºá SAST | ­ƒƒó OPEN |" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "| ­ƒºá SAST | ­ƒö┤ BLOCKED |" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          if [ "${{ needs.secrets_scan.result }}" = "success" ]; then
+            echo "| ­ƒöæ Secrets | ­ƒƒó OPEN |" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "| ­ƒöæ Secrets | ­ƒö┤ BLOCKED |" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          if [ "${{ needs.scan_dependencies.result }}" = "success" ]; then
+            echo "| ­ƒôª SCA | ­ƒƒó OPEN |" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "| ­ƒôª SCA | ­ƒö┤ BLOCKED |" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          if [ "${{ needs.docker_scan.result }}" = "success" ]; then
+            echo "| ­ƒÉ│ Container | ­ƒƒó OPEN |" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "| ­ƒÉ│ Container | ­ƒö┤ BLOCKED |" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          if [ "${{ needs.dast.result }}" = "success" ]; then
+            echo "| ­ƒîÉ DAST | ­ƒƒó OPEN |" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "| ­ƒîÉ DAST | ­ƒö┤ BLOCKED |" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "${{ needs.build.result }}" = "success" ] && \
+             [ "${{ needs.sast.result }}" = "success" ] && \
+             [ "${{ needs.secrets_scan.result }}" = "success" ] && \
+             [ "${{ needs.scan_dependencies.result }}" = "success" ] && \
+             [ "${{ needs.docker_scan.result }}" = "success" ] && \
+             [ "${{ needs.dast.result }}" = "success" ]; then
+
+            echo "## ­ƒƒó FINAL DECISION" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "### ­ƒøí´©Å PIPELINE VALIDATED" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "All blocking security gates have passed successfully." >> "$GITHUB_STEP_SUMMARY"
+
+          else
+
+            echo "## ­ƒö┤ FINAL DECISION" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "### ­ƒÜ¿ PIPELINE BLOCKED" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "At least one blocking security gate requires attention before validation." >> "$GITHUB_STEP_SUMMARY"
+
+          fi
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "---" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "­ƒôÄ **Security reports and SBOM are available in the workflow artifacts.**" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "­ƒôó **Discord notification:** enabled" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "­ƒøí´©Å *DevSecOps ÔÇó Automated Security Validation*" >> "$GITHUB_STEP_SUMMARY"
+
+
+   # ============================================================
+  # CYBER SECURITY CONTROL ROOM - HTML DASHBOARD
+  # ============================================================
+  dashboard:
+    name: ­ƒøí´©Å Cyber Security Control Room
+    runs-on: ubuntu-latest
+
+    needs:
+      - build
+      - sast
+      - secrets_scan
+      - scan_dependencies
+      - docker_scan
+      - scan_iac
+      - generate_sbom
+      - dast
+
+    if: always()
+
+    steps:
+
+      # ========================================================
+      # DOWNLOAD SECURITY ARTIFACTS
+      # ========================================================
+      - name: Download security artifacts
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: "*-report"
+          path: reports
+          merge-multiple: false
+
+      - name: Download SBOM
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: sbom
+          path: reports/sbom
+
+
+      # ========================================================
+      # GENERATE CYBER SECURITY DASHBOARD
+      # ========================================================
+      - name: Generate Cyber Security Dashboard
+        shell: bash
+        run: |
+
+          mkdir -p security-dashboard/reports
+
+          # ----------------------------------------------------
+          # PIPELINE STATUS
+          # ----------------------------------------------------
+
+          BUILD_STATUS="${{ needs.build.result }}"
+          SAST_STATUS="${{ needs.sast.result }}"
+          SECRETS_STATUS="${{ needs.secrets_scan.result }}"
+          SCA_STATUS="${{ needs.scan_dependencies.result }}"
+          DOCKER_STATUS="${{ needs.docker_scan.result }}"
+          IAC_STATUS="${{ needs.scan_iac.result }}"
+          SBOM_STATUS="${{ needs.generate_sbom.result }}"
+          DAST_STATUS="${{ needs.dast.result }}"
+
+          BLOCKING_FAILURES=0
+
+          for STATUS in \
+            "$BUILD_STATUS" \
+            "$SAST_STATUS" \
+            "$SECRETS_STATUS" \
+            "$SCA_STATUS" \
+            "$DOCKER_STATUS" \
+            "$DAST_STATUS"
+          do
+            if [ "$STATUS" != "success" ]; then
+              BLOCKING_FAILURES=$((BLOCKING_FAILURES + 1))
+            fi
+          done
+
+
+          # ----------------------------------------------------
+          # FINAL STATUS
+          # ----------------------------------------------------
+
+          if [ "$BLOCKING_FAILURES" -eq 0 ]; then
+            FINAL_STATUS="SECURE"
+            FINAL_CLASS="secure"
+            FINAL_ICON="­ƒƒó"
+            SECURITY_SCORE="100"
+          else
+            FINAL_STATUS="BLOCKED"
+            FINAL_CLASS="blocked"
+            FINAL_ICON="­ƒö┤"
+
+            SECURITY_SCORE=$((100 - BLOCKING_FAILURES * 15))
+
+            if [ "$SECURITY_SCORE" -lt 0 ]; then
+              SECURITY_SCORE=0
+            fi
+          fi
+
+
+          # ----------------------------------------------------
+          # STATUS FUNCTIONS
+          # ----------------------------------------------------
+
+          status_class() {
+
+            case "$1" in
+              success)
+                echo "passed"
+                ;;
+              skipped)
+                echo "warning"
+                ;;
+              *)
+                echo "blocked"
+                ;;
+            esac
+
+          }
+
+
+          status_icon() {
+
+            case "$1" in
+              success)
+                echo "­ƒƒó"
+                ;;
+              skipped)
+                echo "­ƒƒí"
+                ;;
+              *)
+                echo "­ƒö┤"
+                ;;
+            esac
+
+          }
+
+
+          # ----------------------------------------------------
+          # COLLECT REPORTS
+          # ----------------------------------------------------
+
+          find reports -type f -exec cp {} security-dashboard/reports/ \; 2>/dev/null || true
+
+
+          # ----------------------------------------------------
+          # CREATE REPORT INDEX
+          # ----------------------------------------------------
+
+          REPORT_LINKS=""
+
+          if [ -f "security-dashboard/reports/semgrep-report.json" ]; then
+            REPORT_LINKS="${REPORT_LINKS}
+              <a class=\"report-link\" href=\"reports/semgrep-report.json\" target=\"_blank\">
+                ­ƒºá Semgrep JSON
+              </a>"
+          fi
+
+          if [ -f "security-dashboard/reports/trivy-fs-report.json" ]; then
+            REPORT_LINKS="${REPORT_LINKS}
+              <a class=\"report-link\" href=\"reports/trivy-fs-report.json\" target=\"_blank\">
+                ­ƒôª Trivy Filesystem JSON
+              </a>"
+          fi
+
+          if [ -f "security-dashboard/reports/trivy-docker-report.json" ]; then
+            REPORT_LINKS="${REPORT_LINKS}
+              <a class=\"report-link\" href=\"reports/trivy-docker-report.json\" target=\"_blank\">
+                ­ƒÉ│ Trivy Container JSON
+              </a>"
+          fi
+
+          if [ -f "security-dashboard/reports/report_html.html" ]; then
+            REPORT_LINKS="${REPORT_LINKS}
+              <a class=\"report-link highlight\" href=\"reports/report_html.html\" target=\"_blank\">
+                ­ƒîÉ OWASP ZAP HTML Report
+              </a>"
+          fi
+
+          if [ -f "security-dashboard/reports/report_json.json" ]; then
+            REPORT_LINKS="${REPORT_LINKS}
+              <a class=\"report-link\" href=\"reports/report_json.json\" target=\"_blank\">
+                ­ƒîÉ OWASP ZAP JSON
+              </a>"
+          fi
+
+          if [ -f "security-dashboard/reports/report_md.md" ]; then
+            REPORT_LINKS="${REPORT_LINKS}
+              <a class=\"report-link\" href=\"reports/report_md.md\" target=\"_blank\">
+                ­ƒôØ OWASP ZAP Markdown
+              </a>"
+          fi
+
+          if [ -f "security-dashboard/reports/sbom.json" ]; then
+            REPORT_LINKS="${REPORT_LINKS}
+              <a class=\"report-link\" href=\"reports/sbom.json\" target=\"_blank\">
+                ­ƒôï SBOM ÔÇö CycloneDX
+              </a>"
+          fi
+
+
+          # ----------------------------------------------------
+          # HTML DASHBOARD
+          # ----------------------------------------------------
+
+          cat > security-dashboard/security-dashboard.html <<EOF
+
+          <!DOCTYPE html>
+
+          <html lang="en">
+
+          <head>
+
+          <meta charset="UTF-8">
+
+          <meta name="viewport"
+                content="width=device-width, initial-scale=1.0">
+
+          <title>VOLKSEC ÔÇö DevSecOps Control Room</title>
+
+
+          <style>
+
+          * {
+            box-sizing: border-box;
+          }
+
+
+          body {
+
+            margin: 0;
+
+            font-family:
+              "Segoe UI",
+              Arial,
+              Helvetica,
+              sans-serif;
+
+            background:
+              radial-gradient(
+                circle at top,
+                #10243d 0%,
+                #050b14 45%,
+                #02050a 100%
+              );
+
+            color: #e5f2ff;
+
+            min-height: 100vh;
+
+          }
+
+
+          body::before {
+
+            content: "";
+
+            position: fixed;
+
+            inset: 0;
+
+            pointer-events: none;
+
+            background-image:
+              linear-gradient(
+                rgba(0,255,180,0.025) 1px,
+                transparent 1px
+              ),
+              linear-gradient(
+                90deg,
+                rgba(0,255,180,0.025) 1px,
+                transparent 1px
+              );
+
+            background-size: 40px 40px;
+
+          }
+
+
+          .scan-line {
+
+            position: fixed;
+
+            top: 0;
+
+            left: 0;
+
+            width: 100%;
+
+            height: 2px;
+
+            background:
+              linear-gradient(
+                90deg,
+                transparent,
+                #00ffb3,
+                transparent
+              );
+
+            box-shadow:
+              0 0 15px #00ffb3;
+
+            animation:
+              scan 5s linear infinite;
+
+            z-index: 10;
+
+          }
+
+
+          @keyframes scan {
+
+            0% {
+              transform: translateY(0);
+              opacity: 0;
+            }
+
+            10% {
+              opacity: 1;
+            }
+
+            90% {
+              opacity: 1;
+            }
+
+            100% {
+              transform: translateY(100vh);
+              opacity: 0;
+            }
+
+          }
+
+
+          .container {
+
+            width: min(1450px, 94%);
+
+            margin: auto;
+
+            padding: 35px 0 50px;
+
+            position: relative;
+
+            z-index: 1;
+
+          }
+
+
+          /* ===================================================
+             HEADER
+             =================================================== */
+
+
+          .topbar {
+
+            display: flex;
+
+            justify-content: space-between;
+
+            align-items: center;
+
+            margin-bottom: 25px;
+
+            padding: 12px 18px;
+
+            border:
+
+              1px solid
+              rgba(0,255,179,0.2);
+
+            background:
+              rgba(5,15,26,0.7);
+
+            backdrop-filter:
+              blur(12px);
+
+            border-radius: 10px;
+
+          }
+
+
+          .brand {
+
+            color: #00ffb3;
+
+            font-weight: 800;
+
+            letter-spacing: 3px;
+
+            font-size: 14px;
+
+          }
+
+
+          .live {
+
+            color: #00ffb3;
+
+            font-size: 12px;
+
+            letter-spacing: 2px;
+
+          }
+
+
+          .live-dot {
+
+            display: inline-block;
+
+            width: 8px;
+
+            height: 8px;
+
+            border-radius: 50%;
+
+            background: #00ffb3;
+
+            box-shadow:
+              0 0 12px #00ffb3;
+
+            margin-right: 7px;
+
+            animation:
+              pulse 1.5s infinite;
+
+          }
+
+
+          @keyframes pulse {
+
+            50% {
+              opacity: .3;
+            }
+
+          }
+
+
+          .hero {
+
+            border:
+
+              1px solid
+              rgba(0,255,179,0.25);
+
+            background:
+
+              linear-gradient(
+                135deg,
+                rgba(7,25,43,0.95),
+                rgba(2,10,18,0.98)
+              );
+
+            border-radius: 18px;
+
+            padding: 40px;
+
+            box-shadow:
+              0 0 50px
+              rgba(0,255,179,0.05);
+
+            position: relative;
+
+            overflow: hidden;
+
+            margin-bottom: 25px;
+
+          }
+
+
+          .hero::after {
+
+            content: "010101101001011010010101";
+
+            position: absolute;
+
+            right: 30px;
+
+            top: 30px;
+
+            color:
+              rgba(0,255,179,0.08);
+
+            font-family: monospace;
+
+            font-size: 30px;
+
+            letter-spacing: 7px;
+
+          }
+
+
+          .hero h1 {
+
+            margin: 0;
+
+            font-size: clamp(28px, 4vw, 52px);
+
+            letter-spacing: -1px;
+
+          }
+
+
+          .hero h1 span {
+
+            color: #00ffb3;
+
+            text-shadow:
+              0 0 20px
+              rgba(0,255,179,0.5);
+
+          }
+
+
+          .hero p {
+
+            color: #8ca5bb;
+
+            margin-top: 12px;
+
+          }
+
+
+          .status-badge {
+
+            display: inline-flex;
+
+            align-items: center;
+
+            gap: 10px;
+
+            margin-top: 20px;
+
+            padding: 13px 20px;
+
+            border-radius: 8px;
+
+            font-weight: 800;
+
+            letter-spacing: 1px;
+
+          }
+
+
+          .status-badge.secure {
+
+            color: #00ffb3;
+
+            border:
+              1px solid #00ffb3;
+
+            background:
+              rgba(0,255,179,0.08);
+
+            box-shadow:
+              0 0 20px
+              rgba(0,255,179,0.12);
+
+          }
+
+
+          .status-badge.blocked {
+
+            color: #ff4d6d;
+
+            border:
+              1px solid #ff4d6d;
+
+            background:
+              rgba(255,77,109,0.08);
+
+            box-shadow:
+              0 0 20px
+              rgba(255,77,109,0.12);
+
+          }
+
+
+          /* ===================================================
+             METRICS
+             =================================================== */
+
+
+          .metrics {
+
+            display: grid;
+
+            grid-template-columns:
+              repeat(
+                auto-fit,
+                minmax(220px,1fr)
+              );
+
+            gap: 18px;
+
+            margin-bottom: 25px;
+
+          }
+
+
+          .metric {
+
+            padding: 24px;
+
+            border:
+              1px solid
+              rgba(111,145,170,0.18);
+
+            background:
+              rgba(7,18,30,0.85);
+
+            border-radius: 14px;
+
+            transition:
+              transform .25s,
+              border .25s;
+
+          }
+
+
+          .metric:hover {
+
+            transform:
+              translateY(-4px);
+
+            border-color:
+              rgba(0,255,179,0.45);
+
+          }
+
+
+          .metric-label {
+
+            color: #7892a9;
+
+            font-size: 12px;
+
+            letter-spacing: 1.5px;
+
+            text-transform: uppercase;
+
+          }
+
+
+          .metric-value {
+
+            font-size: 34px;
+
+            font-weight: 800;
+
+            margin-top: 8px;
+
+          }
+
+
+          .score {
+
+            color: #00ffb3;
+
+          }
+
+
+          .blocked-text {
+
+            color: #ff4d6d;
+
+          }
+
+
+          /* ===================================================
+             SECTIONS
+             =================================================== */
+
+
+          .section {
+
+            background:
+              rgba(5,15,26,0.82);
+
+            border:
+              1px solid
+              rgba(111,145,170,0.16);
+
+            border-radius: 16px;
+
+            padding: 28px;
+
+            margin-bottom: 25px;
+
+            backdrop-filter:
+              blur(12px);
+
+          }
+
+
+          .section-title {
+
+            display: flex;
+
+            align-items: center;
+
+            gap: 10px;
+
+            margin-top: 0;
+
+            color: #f1f8ff;
+
+          }
+
+
+          .section-title span {
+
+            color: #00ffb3;
+
+          }
+
+
+          /* ===================================================
+             SECURITY CONTROLS
+             =================================================== */
+
+
+          .controls {
+
+            display: grid;
+
+            grid-template-columns:
+              repeat(
+                auto-fit,
+                minmax(260px,1fr)
+              );
+
+            gap: 15px;
+
+          }
+
+
+          .control {
+
+            position: relative;
+
+            padding: 20px;
+
+            border-radius: 12px;
+
+            background:
+              rgba(9,24,39,0.8);
+
+            border:
+              1px solid
+              rgba(111,145,170,0.15);
+
+            overflow: hidden;
+
+          }
+
+
+          .control::before {
+
+            content: "";
+
+            position: absolute;
+
+            left: 0;
+
+            top: 0;
+
+            bottom: 0;
+
+            width: 3px;
+
+            background: #00ffb3;
+
+          }
+
+
+          .control.blocked::before {
+
+            background: #ff4d6d;
+
+            box-shadow:
+              0 0 12px
+              rgba(255,77,109,.5);
+
+          }
+
+
+          .control.warning::before {
+
+            background: #ffc857;
+
+          }
+
+
+          .control-header {
+
+            display: flex;
+
+            justify-content:
+              space-between;
+
+            align-items: center;
+
+          }
+
+
+          .control-name {
+
+            font-weight: 700;
+
+          }
+
+
+          .tool {
+
+            color: #7892a9;
+
+            font-size: 12px;
+
+            margin-top: 7px;
+
+          }
+
+
+          .control-status {
+
+            margin-top: 16px;
+
+            font-size: 13px;
+
+            font-weight: 800;
+
+          }
+
+
+          .passed-text {
+
+            color: #00ffb3;
+
+          }
+
+
+          .warning-text {
+
+            color: #ffc857;
+
+          }
+
+
+          .danger-text {
+
+            color: #ff4d6d;
+
+          }
+
+
+          /* ===================================================
+             PIPELINE
+             =================================================== */
+
+
+          .pipeline {
+
+            display: flex;
+
+            align-items: center;
+
+            justify-content: center;
+
+            gap: 8px;
+
+            flex-wrap: wrap;
+
+          }
+
+
+          .pipeline-node {
+
+            padding: 14px 17px;
+
+            border-radius: 8px;
+
+            background:
+              #081522;
+
+            border:
+              1px solid
+              rgba(0,255,179,0.25);
+
+            font-size: 12px;
+
+            text-align: center;
+
+          }
+
+
+          .arrow {
+
+            color: #00ffb3;
+
+            font-weight: bold;
+
+          }
+
+
+          /* ===================================================
+             GATES
+             =================================================== */
+
+
+          .gates {
+
+            display: grid;
+
+            grid-template-columns:
+              repeat(
+                auto-fit,
+                minmax(200px,1fr)
+              );
+
+            gap: 15px;
+
+          }
+
+
+          .gate {
+
+            padding: 18px;
+
+            border-radius: 10px;
+
+            background:
+              #071421;
+
+            border:
+              1px solid
+              rgba(111,145,170,0.15);
+
+          }
+
+
+          .gate-title {
+
+            font-weight: 700;
+
+            margin-bottom: 8px;
+
+          }
+
+
+          .gate-description {
+
+            color: #7892a9;
+
+            font-size: 12px;
+
+          }
+
+
+          /* ===================================================
+             REPORTS
+             =================================================== */
+
+
+          .reports {
+
+            display: grid;
+
+            grid-template-columns:
+              repeat(
+                auto-fit,
+                minmax(230px,1fr)
+              );
+
+            gap: 12px;
+
+          }
+
+
+          .report-link {
+
+            display: block;
+
+            padding: 16px;
+
+            border-radius: 9px;
+
+            text-decoration: none;
+
+            color: #a9c2d8;
+
+            background:
+              #081522;
+
+            border:
+              1px solid
+              rgba(111,145,170,0.15);
+
+            transition:
+              .2s;
+
+          }
+
+
+          .report-link:hover {
+
+            color: #00ffb3;
+
+            border-color:
+              #00ffb3;
+
+            transform:
+              translateY(-2px);
+
+          }
+
+
+          .report-link.highlight {
+
+            color: #00ffb3;
+
+            border-color:
+              rgba(0,255,179,.35);
+
+          }
+
+
+          /* ===================================================
+             INFORMATION
+             =================================================== */
+
+
+          .info-grid {
+
+            display: grid;
+
+            grid-template-columns:
+              repeat(
+                auto-fit,
+                minmax(250px,1fr)
+              );
+
+            gap: 12px;
+
+          }
+
+
+          .info {
+
+            padding: 15px;
+
+            background:
+              #071421;
+
+            border-radius: 8px;
+
+          }
+
+
+          .info-label {
+
+            color: #7892a9;
+
+            font-size: 11px;
+
+            text-transform:
+              uppercase;
+
+            letter-spacing: 1px;
+
+          }
+
+
+          .info-value {
+
+            margin-top: 5px;
+
+            word-break: break-all;
+
+            font-family: monospace;
+
+            font-size: 13px;
+
+          }
+
+
+          footer {
+
+            text-align: center;
+
+            color: #516b80;
+
+            padding: 30px;
+
+            font-size: 12px;
+
+          }
+
+
+          @media(max-width:700px) {
+
+            .hero {
+              padding: 25px;
+            }
+
+            .section {
+              padding: 20px;
+            }
+
+            .pipeline {
+              flex-direction: column;
+            }
+
+            .arrow {
+              transform: rotate(90deg);
+            }
+
+          }
+
+          </style>
+
+          </head>
+
+
+          <body>
+
+          <div class="scan-line"></div>
+
+
+          <div class="container">
+
+
+            <div class="topbar">
+
+              <div class="brand">
+                VOLKSEC // DEVSECOPS
+              </div>
+
+              <div class="live">
+                <span class="live-dot"></span>
+                SECURITY MONITOR
+              </div>
+
+            </div>
+
+
+            <!-- ==============================================
+                 HERO
+                 ============================================== -->
+
+            <div class="hero">
+
+              <h1>
+                ­ƒøí´©Å CYBER SECURITY
+                <span>CONTROL ROOM</span>
+              </h1>
+
+              <p>
+                OWASP Juice Shop ÔÇö Automated Continuous Security Validation
+              </p>
+
+              <div class="status-badge $FINAL_CLASS">
+
+                $FINAL_ICON
+
+                PIPELINE $FINAL_STATUS
+
+              </div>
+
+            </div>
+
+
+            <!-- ==============================================
+                 METRICS
+                 ============================================== -->
+
+            <div class="metrics">
+
+
+              <div class="metric">
+
+                <div class="metric-label">
+                  Security Score
+                </div>
+
+                <div class="metric-value score">
+                  $SECURITY_SCORE%
+                </div>
+
+              </div>
+
+
+              <div class="metric">
+
+                <div class="metric-label">
+                  Blocking Failures
+                </div>
+
+                <div class="metric-value blocked-text">
+                  $BLOCKING_FAILURES
+                </div>
+
+              </div>
+
+
+              <div class="metric">
+
+                <div class="metric-label">
+                  Security Controls
+                </div>
+
+                <div class="metric-value">
+                  8
+                </div>
+
+              </div>
+
+
+              <div class="metric">
+
+                <div class="metric-label">
+                  Pipeline Run
+                </div>
+
+                <div class="metric-value">
+                  #${{ github.run_number }}
+                </div>
+
+              </div>
+
+
+            </div>
+
+
+            <!-- ==============================================
+                 SECURITY CONTROLS
+                 ============================================== -->
+
+            <div class="section">
+
+              <h2 class="section-title">
+                <span>Ôùê</span>
+                Security Control Matrix
+              </h2>
+
+
+              <div class="controls">
+
+
+                <div class="control $(status_class "$BUILD_STATUS")">
+
+                  <div class="control-header">
+
+                    <div class="control-name">
+                      ­ƒÅù´©Å BUILD
+                    </div>
+
+                    <div>
+                      $(status_icon "$BUILD_STATUS")
+                    </div>
+
+                  </div>
+
+                  <div class="tool">
+                    Node.js / TypeScript
+                  </div>
+
+                  <div class="control-status">
+                    $BUILD_STATUS
+                  </div>
+
+                </div>
+
+
+                <div class="control $(status_class "$SAST_STATUS")">
+
+                  <div class="control-header">
+
+                    <div class="control-name">
+                      ­ƒºá SAST
+                    </div>
+
+                    <div>
+                      $(status_icon "$SAST_STATUS")
+                    </div>
+
+                  </div>
+
+                  <div class="tool">
+                    Semgrep / OWASP Top 10
+                  </div>
+
+                  <div class="control-status">
+                    $SAST_STATUS
+                  </div>
+
+                </div>
+
+
+                <div class="control $(status_class "$SECRETS_STATUS")">
+
+                  <div class="control-header">
+
+                    <div class="control-name">
+                      ­ƒöæ SECRETS
+                    </div>
+
+                    <div>
+                      $(status_icon "$SECRETS_STATUS")
+                    </div>
+
+                  </div>
+
+                  <div class="tool">
+                    Gitleaks
+                  </div>
+
+                  <div class="control-status">
+                    $SECRETS_STATUS
+                  </div>
+
+                </div>
+
+
+                <div class="control $(status_class "$SCA_STATUS")">
+
+                  <div class="control-header">
+
+                    <div class="control-name">
+                      ­ƒôª SCA
+                    </div>
+
+                    <div>
+                      $(status_icon "$SCA_STATUS")
+                    </div>
+
+                  </div>
+
+                  <div class="tool">
+                    Trivy Filesystem
+                  </div>
+
+                  <div class="control-status">
+                    $SCA_STATUS
+                  </div>
+
+                </div>
+
+
+                <div class="control $(status_class "$DOCKER_STATUS")">
+
+                  <div class="control-header">
+
+                    <div class="control-name">
+                      ­ƒÉ│ CONTAINER
+                    </div>
+
+                    <div>
+                      $(status_icon "$DOCKER_STATUS")
+                    </div>
+
+                  </div>
+
+                  <div class="tool">
+                    Trivy Image Scanner
+                  </div>
+
+                  <div class="control-status">
+                    $DOCKER_STATUS
+                  </div>
+
+                </div>
+
+
+                <div class="control warning">
+
+                  <div class="control-header">
+
+                    <div class="control-name">
+                      ­ƒÅù´©Å IaC
+                    </div>
+
+                    <div>
+                      ­ƒƒí
+                    </div>
+
+                  </div>
+
+                  <div class="tool">
+                    Checkov / Terraform
+                  </div>
+
+                  <div class="control-status warning-text">
+                    AUDIT / NON-BLOCKING
+                  </div>
+
+                </div>
+
+
+                <div class="control $(status_class "$SBOM_STATUS")">
+
+                  <div class="control-header">
+
+                    <div class="control-name">
+                      ­ƒôï SBOM
+                    </div>
+
+                    <div>
+                      $(status_icon "$SBOM_STATUS")
+                    </div>
+
+                  </div>
+
+                  <div class="tool">
+                    Syft / CycloneDX
+                  </div>
+
+                  <div class="control-status">
+                    $SBOM_STATUS
+                  </div>
+
+                </div>
+
+
+                <div class="control $(status_class "$DAST_STATUS")">
+
+                  <div class="control-header">
+
+                    <div class="control-name">
+                      ­ƒîÉ DAST
+                    </div>
+
+                    <div>
+                      $(status_icon "$DAST_STATUS")
+                    </div>
+
+                  </div>
+
+                  <div class="tool">
+                    OWASP ZAP
+                  </div>
+
+                  <div class="control-status">
+                    $DAST_STATUS
+                  </div>
+
+                </div>
+
+
+              </div>
+
+            </div>
+
+
+            <!-- ==============================================
+                 PIPELINE
+                 ============================================== -->
+
+            <div class="section">
+
+              <h2 class="section-title">
+                <span>Ôùê</span>
+                Security Pipeline
+              </h2>
+
+
+              <div class="pipeline">
+
+                <div class="pipeline-node">
+                  SOURCE
+                </div>
+
+                <div class="arrow">ÔåÆ</div>
+
+                <div class="pipeline-node">
+                  ­ƒºá SAST
+                </div>
+
+                <div class="arrow">ÔåÆ</div>
+
+                <div class="pipeline-node">
+                  ­ƒöæ SECRETS
+                </div>
+
+                <div class="arrow">ÔåÆ</div>
+
+                <div class="pipeline-node">
+                  ­ƒôª SCA
+                </div>
+
+                <div class="arrow">ÔåÆ</div>
+
+                <div class="pipeline-node">
+                  ­ƒÉ│ CONTAINER
+                </div>
+
+                <div class="arrow">ÔåÆ</div>
+
+                <div class="pipeline-node">
+                  ­ƒîÉ DAST
+                </div>
+
+                <div class="arrow">ÔåÆ</div>
+
+                <div class="pipeline-node">
+                  ­ƒøí´©Å GATE
+                </div>
+
+              </div>
+
+            </div>
+
+
+            <!-- ==============================================
+                 SECURITY GATES
+                 ============================================== -->
+
+            <div class="section">
+
+              <h2 class="section-title">
+                <span>Ôùê</span>
+                Security Gates
+              </h2>
+
+
+              <div class="gates">
+
+
+                <div class="gate">
+
+                  <div class="gate-title">
+                    ­ƒºá SAST
+                  </div>
+
+                  <div class="gate-description">
+                    Semgrep findings
+                  </div>
+
+                  <br>
+
+                  $(status_icon "$SAST_STATUS")
+                  $SAST_STATUS
+
+                </div>
+
+
+                <div class="gate">
+
+                  <div class="gate-title">
+                    ­ƒöæ Secrets
+                  </div>
+
+                  <div class="gate-description">
+                    Hardcoded secret detection
+                  </div>
+
+                  <br>
+
+                  $(status_icon "$SECRETS_STATUS")
+                  $SECRETS_STATUS
+
+                </div>
+
+
+                <div class="gate">
+
+                  <div class="gate-title">
+                    ­ƒôª SCA
+                  </div>
+
+                  <div class="gate-description">
+                    HIGH / CRITICAL vulnerabilities
+                  </div>
+
+                  <br>
+
+                  $(status_icon "$SCA_STATUS")
+                  $SCA_STATUS
+
+                </div>
+
+
+                <div class="gate">
+
+                  <div class="gate-title">
+                    ­ƒÉ│ Container
+                  </div>
+
+                  <div class="gate-description">
+                    HIGH / CRITICAL image vulnerabilities
+                  </div>
+
+                  <br>
+
+                  $(status_icon "$DOCKER_STATUS")
+                  $DOCKER_STATUS
+
+                </div>
+
+
+                <div class="gate">
+
+                  <div class="gate-title">
+                    ­ƒîÉ DAST
+                  </div>
+
+                  <div class="gate-description">
+                    OWASP ZAP FAIL threshold
+                  </div>
+
+                  <br>
+
+                  $(status_icon "$DAST_STATUS")
+                  $DAST_STATUS
+
+                </div>
+
+
+                <div class="gate">
+
+                  <div class="gate-title">
+                    ­ƒÅù´©Å IaC
+                  </div>
+
+                  <div class="gate-description">
+                    Checkov audit ÔÇö non-blocking
+                  </div>
+
+                  <br>
+
+                  ­ƒƒí REVIEW
+
+                </div>
+
+
+              </div>
+
+            </div>
+
+
+            <!-- ==============================================
+                 SECURITY EVIDENCE
+                 ============================================== -->
+
+            <div class="section">
+
+              <h2 class="section-title">
+                <span>Ôùê</span>
+                Security Evidence & Reports
+              </h2>
+
+              <p style="color:#7892a9">
+                Reports generated automatically by the DevSecOps pipeline.
+                Open an artifact below to inspect the detailed security evidence.
+              </p>
+
+
+              <div class="reports">
+
+                $REPORT_LINKS
+
+              </div>
+
+            </div>
+
+
+            <!-- ==============================================
+                 PIPELINE TELEMETRY
+                 ============================================== -->
+
+            <div class="section">
+
+              <h2 class="section-title">
+                <span>Ôùê</span>
+                Pipeline Telemetry
+              </h2>
+
+
+              <div class="info-grid">
+
+
+                <div class="info">
+
+                  <div class="info-label">
+                    Repository
+                  </div>
+
+                  <div class="info-value">
+                    ${{ github.repository }}
+                  </div>
+
+                </div>
+
+
+                <div class="info">
+
+                  <div class="info-label">
+                    Branch
+                  </div>
+
+                  <div class="info-value">
+                    ${{ github.ref_name }}
+                  </div>
+
+                </div>
+
+
+                <div class="info">
+
+                  <div class="info-label">
+                    Commit
+                  </div>
+
+                  <div class="info-value">
+                    ${{ github.sha }}
+                  </div>
+
+                </div>
+
+
+                <div class="info">
+
+                  <div class="info-label">
+                    Triggered By
+                  </div>
+
+                  <div class="info-value">
+                    ${{ github.actor }}
+                  </div>
+
+                </div>
+
+
+                <div class="info">
+
+                  <div class="info-label">
+                    Workflow
+                  </div>
+
+                  <div class="info-value">
+                    ${{ github.workflow }}
+                  </div>
+
+                </div>
+
+
+                <div class="info">
+
+                  <div class="info-label">
+                    Run ID
+                  </div>
+
+                  <div class="info-value">
+                    ${{ github.run_id }}
+                  </div>
+
+                </div>
+
+
+              </div>
+
+            </div>
+
+
+            <footer>
+
+              ­ƒøí´©Å VOLKSEC // DevSecOps Security Control Room
+
+              <br><br>
+
+              Automated security validation ÔÇó Shift Left Security
+
+              <br>
+
+              Generated by GitHub Actions
+
+            </footer>
+
+
+          </div>
+
+          </body>
+
+          </html>
+
+          EOF
+
+
+      # ========================================================
+      # UPLOAD COMPLETE SECURITY CONTROL ROOM
+      # ========================================================
+      - name: Upload Security Control Room
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-dashboard
+          path: security-dashboard
+          if-no-files-found: error
