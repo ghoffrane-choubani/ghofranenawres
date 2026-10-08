@@ -212,7 +212,9 @@ jobs:
             -w report_md.md \
             -r report_html.html \
             -a
-
+      # ----------------------------------------------------
+      # UPLOAD ZAP REPORTS
+      # ----------------------------------------------------
       # ----------------------------------------------------
       # UPLOAD ZAP REPORTS
       # ----------------------------------------------------
@@ -225,7 +227,8 @@ jobs:
             report_html.html
             report_json.json
             report_md.md
-          if-no-files-found: warn
+          if-no-files-found: error
+          retention-days: 30
 
       # ----------------------------------------------------
       # DAST SECURITY GATE
